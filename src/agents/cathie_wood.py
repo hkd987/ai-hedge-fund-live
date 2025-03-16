@@ -1,6 +1,6 @@
 from langchain_openai import ChatOpenAI
 from graph.state import AgentState, show_agent_reasoning
-from tools.api import get_financial_metrics, get_market_cap, search_line_items
+from tools.api import get_financial_metrics, get_market_cap, search_line_items, get_company_news
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -8,6 +8,7 @@ import json
 from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
+from utils.caching import cached_analyst
 
 class CathieWoodSignal(BaseModel):
     signal: Literal["bullish", "bearish", "neutral"]
@@ -15,6 +16,7 @@ class CathieWoodSignal(BaseModel):
     reasoning: str
 
 
+@cached_analyst()
 def cathie_wood_agent(state: AgentState):
     """
     Analyzes stocks using Cathie Wood's investing principles and LLM reasoning.

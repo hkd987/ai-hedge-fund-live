@@ -9,6 +9,7 @@ from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
 import math
+from utils.caching import cached_analyst
 
 
 class BenGrahamSignal(BaseModel):
@@ -17,6 +18,7 @@ class BenGrahamSignal(BaseModel):
     reasoning: str
 
 
+@cached_analyst()
 def ben_graham_agent(state: AgentState):
     """
     Analyzes stocks using Benjamin Graham's classic value-investing principles:

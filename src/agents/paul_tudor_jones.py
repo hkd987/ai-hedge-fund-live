@@ -10,6 +10,7 @@ from tools.api import get_prices, prices_to_df, get_financial_metrics, get_marke
 from utils.llm import call_llm
 from utils.progress import progress
 from datetime import datetime, timedelta
+from utils.caching import cached_analyst
 
 
 class PaulTudorJonesSignal(BaseModel):
@@ -18,6 +19,7 @@ class PaulTudorJonesSignal(BaseModel):
     reasoning: str
 
 
+@cached_analyst()
 def paul_tudor_jones_agent(state: AgentState):
     """
     Analyzes stocks using Tudor Jones' technical and macro principles.

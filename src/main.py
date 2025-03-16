@@ -840,37 +840,138 @@ def main():
     print(f"  Start date: {start_date}")
     print(f"  End date: {end_date}")
     print(f"  Portfolio cash: ${portfolio.get('cash', 0):.2f}")
+    if args.schedule:
+        print(f"  Running in scheduled mode with {args.interval} minute intervals")
+        print(f"  Portfolio checks every {args.check_interval} minutes")
     print()
     
     # Check market conditions
     check_market_conditions()
     
-    # Run the hedge fund
-    result = run_hedge_fund(
-        tickers=tickers,
-        start_date=start_date,
-        end_date=end_date,
-        portfolio=portfolio,
-        show_reasoning=args.show_reasoning,
-        selected_analysts=selected_analysts,
-        model_name=model_name,
-        model_provider=model_provider,
-        args=args,
-    )
-    
-    # Check for errors
-    if "error" in result:
-        print(f"Error running hedge fund: {result['error']}")
-        return
-    
-    # Print the trading output
-    print_trading_output(result)
-    
-    # If live trading is enabled, update the portfolio status
-    if LIVE_TRADING_ENABLED:
-        alpaca_client = get_alpaca_client()
-        if alpaca_client:
-            update_portfolio_status(alpaca_client, portfolio)
+    # Check if we should run in scheduled mode
+    if args.schedule:
+        # Get intervals in seconds
+        run_interval_seconds = args.interval * 60
+        check_interval_seconds = args.check_interval * 60
+        
+        # Print start message
+        print(f"\n{Fore.CYAN}Starting scheduled runs. Press Ctrl+C to exit.{Style.RESET_ALL}")
+        print(f"Full analysis runs every {args.interval} minutes")
+        print(f"Portfolio checks every {args.check_interval} minutes")
+        
+        # Track last run times
+        last_full_run = datetime.now()
+        last_check = datetime.now()
+        
+        # Run until interrupted
+        try:
+            while True:
+                current_time = datetime.now()
+                
+                # Calculate time since last runs
+                time_since_full_run = (current_time - last_full_run).total_seconds()
+                time_since_check = (current_time - last_check).total_seconds()
+                
+                # Check if it's time for a full run
+                if time_since_full_run >= run_interval_seconds:
+                    print(f"\n{Fore.GREEN}Running full analysis at {current_time.strftime('%Y-%m-%d %H:%M:%S')}{Style.RESET_ALL}")
+                    
+                    # Run full analysis
+                    result = run_hedge_fund(
+                        tickers=tickers,
+                        start_date=start_date,
+                        end_date=end_date,
+                        portfolio=portfolio,
+                        show_reasoning=args.show_reasoning,
+                        selected_analysts=selected_analysts,
+                        model_name=model_name,
+                        model_provider=model_provider,
+                        args=args,
+                    )
+                    
+                    # Check for errors
+                    if "error" in result:
+                        print(f"Error running hedge fund: {result['error']}")
+                    else:
+                        # Print the trading output
+                        print_trading_output(result)
+                        
+                        # Update portfolio
+                        if LIVE_TRADING_ENABLED:
+                            alpaca_client, portfolio = update_portfolio_status(alpaca_client, portfolio)
+                    
+                    # Update last full run time
+                    last_full_run = datetime.now()
+                    last_check = datetime.now()
+                
+                # Check if it's time for a portfolio check
+                elif time_since_check >= check_interval_seconds:
+                    print(f"\n{Fore.YELLOW}Checking portfolio at {current_time.strftime('%Y-%m-%d %H:%M:%S')}{Style.RESET_ALL}")
+                    
+                    # Update portfolio status
+                    if LIVE_TRADING_ENABLED:
+                        alpaca_client, portfolio = update_portfolio_status(alpaca_client, portfolio)
+                        
+                        # Print current portfolio value
+                        print(f"Current portfolio value: ${portfolio.get('portfolio_value', 0):.2f}")
+                        print(f"Cash: ${portfolio.get('cash', 0):.2f}")
+                        
+                        # Print positions
+                        if portfolio.get("positions"):
+                            print("Current positions:")
+                            for ticker, position in portfolio["positions"].items():
+                                if position.get("long", 0) > 0:
+                                    print(f"  {ticker}: {position['long']} shares (LONG)")
+                                elif position.get("short", 0) > 0:
+                                    print(f"  {ticker}: {position['short']} shares (SHORT)")
+                    else:
+                        print("Live trading disabled. Cannot check portfolio status.")
+                    
+                    # Update last check time
+                    last_check = datetime.now()
+                
+                # Sleep to avoid high CPU usage
+                time.sleep(10)
+                
+                # Calculate and print time until next runs
+                current_time = datetime.now()
+                time_until_full_run = run_interval_seconds - (current_time - last_full_run).total_seconds()
+                time_until_check = check_interval_seconds - (current_time - last_check).total_seconds()
+                
+                # Only print status every 30 seconds to avoid excessive output
+                if int(time.time()) % 30 == 0:
+                    print(f"\rNext full run in {int(time_until_full_run/60)} minutes, next check in {int(time_until_check/60)} minutes    ", end="")
+                
+        except KeyboardInterrupt:
+            print(f"\n{Fore.CYAN}Scheduled mode terminated by user.{Style.RESET_ALL}")
+            return
+    else:
+        # Run single analysis
+        result = run_hedge_fund(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            portfolio=portfolio,
+            show_reasoning=args.show_reasoning,
+            selected_analysts=selected_analysts,
+            model_name=model_name,
+            model_provider=model_provider,
+            args=args,
+        )
+        
+        # Check for errors
+        if "error" in result:
+            print(f"Error running hedge fund: {result['error']}")
+            return
+        
+        # Print the trading output
+        print_trading_output(result)
+        
+        # If live trading is enabled, update the portfolio status
+        if LIVE_TRADING_ENABLED:
+            alpaca_client = get_alpaca_client()
+            if alpaca_client:
+                update_portfolio_status(alpaca_client, portfolio)
 
 
 def run_hedge_fund(

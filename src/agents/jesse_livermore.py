@@ -9,6 +9,7 @@ from typing_extensions import Literal
 from tools.api import get_prices, prices_to_df, get_financial_metrics, get_market_cap
 from utils.llm import call_llm
 from utils.progress import progress
+from utils.caching import cached_analyst
 
 
 class JesseLivermoreSignal(BaseModel):
@@ -17,6 +18,7 @@ class JesseLivermoreSignal(BaseModel):
     reasoning: str
 
 
+@cached_analyst()
 def jesse_livermore_agent(state: AgentState):
     """
     Jesse Livermore agent that analyzes stocks based on his speculative trading methodology.

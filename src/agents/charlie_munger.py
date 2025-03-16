@@ -7,6 +7,7 @@ import json
 from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
+from utils.caching import cached_analyst
 
 class CharlieMungerSignal(BaseModel):
     signal: Literal["bullish", "bearish", "neutral"]
@@ -14,6 +15,7 @@ class CharlieMungerSignal(BaseModel):
     reasoning: str
 
 
+@cached_analyst()
 def charlie_munger_agent(state: AgentState):
     """
     Analyzes stocks using Charlie Munger's investing principles and mental models.

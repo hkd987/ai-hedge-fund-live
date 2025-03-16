@@ -10,6 +10,7 @@ from tools.api import get_prices, prices_to_df, get_company_news, get_financial_
 from utils.llm import call_llm
 from utils.progress import progress
 from datetime import datetime, timedelta
+from utils.caching import cached_analyst
 
 
 class LindaRaschkeSignal(BaseModel):
@@ -18,6 +19,7 @@ class LindaRaschkeSignal(BaseModel):
     reasoning: str
 
 
+@cached_analyst()
 def linda_raschke_agent(state: AgentState):
     """
     Linda Raschke's agent for short-term technical trading strategies.

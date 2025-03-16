@@ -15,6 +15,7 @@ from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
 import statistics
+from utils.caching import cached_analyst
 
 
 class StanleyDruckenmillerSignal(BaseModel):
@@ -23,6 +24,7 @@ class StanleyDruckenmillerSignal(BaseModel):
     reasoning: str
 
 
+@cached_analyst()
 def stanley_druckenmiller_agent(state: AgentState):
     """
     Analyzes stocks using Stanley Druckenmiller's investing principles:

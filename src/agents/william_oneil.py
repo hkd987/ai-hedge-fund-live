@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from graph.state import AgentState, show_agent_reasoning
 from utils.progress import progress
 from utils.llm import call_llm
+from utils.caching import cached_analyst
 
 # Data utilities
 from tools.api import (
@@ -942,6 +943,7 @@ def analyze_market_direction(market_data: pd.DataFrame) -> dict:
         }
 
 
+@cached_analyst()
 def william_oneil_agent(state: AgentState):
     """
     The William O'Neil agent identifies growth stocks using the CANSLIM methodology.
