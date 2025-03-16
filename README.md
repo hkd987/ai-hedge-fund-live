@@ -141,6 +141,61 @@ poetry run python src/main.py --include-alpaca-holdings
 
 This ensures the hedge fund makes decisions about all positions in your portfolio, not just the ones you manually specify.
 
+### Risk Management Features
+
+The AI hedge fund incorporates comprehensive risk management features to protect your capital:
+
+#### Automated Stop Loss and Take Profit Orders
+All buy and short orders automatically include:
+- Stop loss orders (default: 5% from entry price)
+- Take profit orders (default: 20% from entry price)
+
+#### Position Sizing Controls
+- Maximum position size limited to 10% of portfolio by default
+- Maximum sector exposure limited to 25% of portfolio by default
+- Automated size reduction during high market volatility
+
+#### Circuit Breakers
+- Daily loss circuit breaker (default: 3% portfolio loss in a day)
+- Maximum drawdown protection (default: 10% from peak)
+- Trading automatically suspended when circuit breakers trigger
+
+#### Daily Trading Limits
+- Maximum trades per day (default: 10)
+- Maximum capital deployment per day (default: 20% of portfolio)
+
+#### Emergency Controls
+Use the emergency liquidation feature to immediately sell all positions:
+```bash
+poetry run python src/main.py --emergency-liquidate
+```
+This "panic button" requires confirmation and will sell all positions at market price.
+
+#### Customizing Risk Parameters
+You can customize all risk parameters in your `.env` file:
+```
+# Stop loss and take profit settings
+STOP_LOSS_PCT=0.05
+TAKE_PROFIT_PCT=0.20
+TRAILING_STOP_PCT=0.03
+
+# Position sizing constraints
+MAX_POSITION_SIZE_PCT=0.10
+MAX_SECTOR_EXPOSURE_PCT=0.25
+
+# Daily trading limits
+MAX_DAILY_TRADES=10
+MAX_DAILY_CAPITAL_PCT=0.20
+
+# Portfolio-wide risk controls
+MAX_DRAWDOWN_PCT=0.10
+DAILY_LOSS_CIRCUIT_BREAKER_PCT=0.03
+
+# Market condition adjustments
+HIGH_VOLATILITY_REDUCTION_PCT=0.50
+HIGH_VOLATILITY_VIX_THRESHOLD=25
+```
+
 **IMPORTANT**: Before enabling live trading with real funds, thoroughly test the system with paper trading and understand the risks involved.
 
 ### Running the Backtester

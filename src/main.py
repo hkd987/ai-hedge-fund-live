@@ -20,6 +20,7 @@ from utils.display import print_trading_output
 from utils.analysts import ANALYST_ORDER, get_analyst_nodes
 from utils.progress import progress
 from llm.models import LLM_ORDER, get_model_info
+from utils.market_data import get_current_vix, get_market_status, ALPACA_AVAILABLE as MARKET_DATA_AVAILABLE
 
 import argparse
 from datetime import datetime
@@ -32,6 +33,8 @@ import logging
 # For Alpaca holdings integration
 try:
     from alpaca.trading.client import TradingClient
+    from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
+    from alpaca.trading.requests import MarketOrderRequest
     ALPACA_AVAILABLE = True
 except ImportError:
     ALPACA_AVAILABLE = False
@@ -44,6 +47,9 @@ init(autoreset=True)
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('main')
+
+# Check for live trading environment variable
+LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
 
 def parse_hedge_fund_response(response):
@@ -58,6 +64,26 @@ def parse_hedge_fund_response(response):
         return None
     except Exception as e:
         print(f"Unexpected error while parsing response: {e}\nResponse: {repr(response)}")
+        return None
+
+
+def get_alpaca_client():
+    """Initialize and return Alpaca trading client if credentials are available"""
+    if not ALPACA_AVAILABLE:
+        logger.warning("Alpaca SDK not installed. Run 'pip install alpaca-py' to enable live trading.")
+        return None
+
+    api_key = os.getenv("ALPACA_API_KEY")
+    api_secret = os.getenv("ALPACA_API_SECRET")
+    
+    if not api_key or not api_secret:
+        logger.warning("Alpaca API credentials not found in environment variables.")
+        return None
+    
+    try:
+        return TradingClient(api_key, api_secret, paper=True)
+    except Exception as e:
+        logger.error(f"Failed to initialize Alpaca client: {e}")
         return None
 
 
@@ -96,6 +122,102 @@ def get_alpaca_holdings():
         return []
 
 
+def emergency_liquidate_all_positions():
+    """
+    Emergency function to liquidate all positions in the portfolio.
+    This is the "panic button" to be used in emergency situations.
+    """
+    if not LIVE_TRADING_ENABLED:
+        logger.warning("Live trading is not enabled. Cannot liquidate positions.")
+        return False
+    
+    client = get_alpaca_client()
+    if not client:
+        logger.error("Alpaca client not available. Cannot liquidate positions.")
+        return False
+    
+    try:
+        # Get all positions
+        positions = client.get_all_positions()
+        
+        if not positions:
+            logger.info("No positions to liquidate.")
+            return True
+        
+        logger.warning(f"EMERGENCY LIQUIDATION: Attempting to liquidate {len(positions)} positions")
+        
+        # Liquidate each position
+        for position in positions:
+            ticker = position.symbol
+            qty = abs(int(position.qty))  # Absolute quantity
+            
+            if qty <= 0:
+                continue
+                
+            # Determine if this is a long or short position
+            if int(position.qty) > 0:  # Long position
+                action = "sell"
+                side = OrderSide.SELL
+            else:  # Short position
+                action = "cover"
+                side = OrderSide.BUY
+            
+            # Create market order to liquidate
+            order_data = MarketOrderRequest(
+                symbol=ticker,
+                qty=qty,
+                side=side,
+                time_in_force=TimeInForce.DAY
+            )
+            
+            # Submit the order
+            order = client.submit_order(order_data)
+            logger.warning(f"EMERGENCY: Submitted {action} order for {qty} shares of {ticker}: Order ID {order.id}")
+        
+        logger.warning("EMERGENCY LIQUIDATION COMPLETE: All positions have been liquidated")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to liquidate positions: {e}")
+        return False
+
+
+def check_market_conditions():
+    """
+    Check current market conditions and return relevant data for risk assessment.
+    """
+    conditions = {
+        "vix": None,
+        "market_open": None,
+        "high_volatility": False
+    }
+    
+    # Skip if Alpaca market data is not available
+    if not MARKET_DATA_AVAILABLE:
+        logger.warning("Alpaca market data is not available. Skipping market condition checks.")
+        return conditions
+    
+    # Get VIX data
+    vix_value = get_current_vix()
+    
+    # Get market status
+    market_status = get_market_status()
+    
+    conditions = {
+        "vix": vix_value,
+        "market_open": market_status.get("is_open"),
+        "high_volatility": vix_value > float(os.getenv("HIGH_VOLATILITY_VIX_THRESHOLD", 25)) if vix_value else False
+    }
+    
+    # Log market conditions
+    logger.info(f"Market conditions from Alpaca: VIX={vix_value}, Market Open={market_status.get('is_open')}")
+    
+    if conditions["high_volatility"]:
+        logger.warning(f"HIGH VOLATILITY DETECTED: VIX at {vix_value}")
+    
+    return conditions
+
+
 ##### Run the Hedge Fund #####
 def run_hedge_fund(
     tickers: list[str],
@@ -117,6 +239,13 @@ def run_hedge_fund(
             agent = workflow.compile()
         else:
             agent = app
+            
+        # Check market conditions if in live trading mode
+        if LIVE_TRADING_ENABLED:
+            market_conditions = check_market_conditions()
+            
+            # Add market conditions to the state data
+            portfolio["market_conditions"] = market_conditions
 
         final_state = agent.invoke(
             {
@@ -217,8 +346,28 @@ if __name__ == "__main__":
     parser.add_argument(
         "--show-agent-graph", action="store_true", help="Show the agent graph"
     )
+    parser.add_argument(
+        "--emergency-liquidate",
+        action="store_true",
+        help="Emergency liquidate all positions and exit. This is the 'panic button'."
+    )
 
     args = parser.parse_args()
+    
+    # Handle emergency liquidation first if requested
+    if args.emergency_liquidate:
+        if questionary.confirm(
+            "⚠️ EMERGENCY LIQUIDATION ⚠️\nThis will sell ALL positions immediately at market price.\nAre you absolutely sure?",
+            default=False
+        ).ask():
+            print(f"{Fore.RED}{Style.BRIGHT}EXECUTING EMERGENCY LIQUIDATION{Style.RESET_ALL}")
+            if emergency_liquidate_all_positions():
+                print(f"{Fore.GREEN}Emergency liquidation complete.{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}Failed to complete emergency liquidation.{Style.RESET_ALL}")
+        else:
+            print("Emergency liquidation cancelled.")
+        sys.exit(0)
 
     # Get tickers from various sources
     all_tickers = []

@@ -10,11 +10,27 @@ from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
 
+# Import risk management module
+from utils.risk_manager import (
+    can_execute_trade, 
+    record_trade_execution, 
+    reset_daily_state,
+    update_portfolio_value,
+    RISK_PARAMS
+)
+
 # Import alpaca-py for live trading
 try:
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.requests import MarketOrderRequest
-    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import (
+        MarketOrderRequest, 
+        LimitOrderRequest, 
+        StopOrderRequest,
+        StopLimitOrderRequest,
+        TrailingStopOrderRequest,
+        BracketOrderRequest
+    )
+    from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
     ALPACA_AVAILABLE = True
 except ImportError:
     ALPACA_AVAILABLE = False
@@ -58,10 +74,15 @@ def get_alpaca_client():
         return None
 
 
-def execute_alpaca_trade(ticker, action, quantity):
-    """Execute a trade using Alpaca API"""
+def execute_alpaca_trade(ticker, action, quantity, current_price):
+    """Execute a trade using Alpaca API with risk management controls"""
     if quantity <= 0:
         logger.info(f"Skipping {action} order for {ticker}: quantity must be > 0")
+        return False
+    
+    # Apply risk management checks
+    if not can_execute_trade(ticker, action, quantity, current_price):
+        logger.warning(f"Risk management rejected {action} order for {ticker}")
         return False
     
     client = get_alpaca_client()
@@ -101,27 +122,84 @@ def execute_alpaca_trade(ticker, action, quantity):
                     if abs(current_qty) < quantity:
                         logger.info(f"Adjusting cover quantity from {quantity} to {abs(current_qty)} for {ticker}")
                         quantity = abs(current_qty)
-                        
-                # Handle short (opening/increasing a short position)
-                # No special handling needed beyond the order request
                 
             except Exception as e:
                 # Position doesn't exist
                 if action == "cover":
                     logger.warning(f"Cannot cover {ticker}: No position exists")
                     return False
+                elif action == "short":
+                    # This is a new short position, no special handling needed
+                    pass
         
-        # Create the order request
-        order_data = MarketOrderRequest(
-            symbol=ticker,
-            qty=quantity,
-            side=side,
-            time_in_force=TimeInForce.DAY
-        )
+        # Calculate stop loss and take profit prices
+        stop_loss_price = None
+        take_profit_price = None
+        
+        if action == "buy":
+            # Calculate stop loss (5% below purchase price by default)
+            stop_loss_price = current_price * (1 - RISK_PARAMS["STOP_LOSS_PCT"])
+            # Calculate take profit (20% above purchase price by default)
+            take_profit_price = current_price * (1 + RISK_PARAMS["TAKE_PROFIT_PCT"])
+            
+            # Use bracket order for buy orders to include stop loss and take profit
+            order_data = BracketOrderRequest(
+                symbol=ticker,
+                qty=quantity,
+                side=side,
+                type=OrderType.MARKET,
+                time_in_force=TimeInForce.DAY,
+                take_profit=LimitOrderRequest(
+                    limit_price=take_profit_price,
+                    time_in_force=TimeInForce.GTC
+                ),
+                stop_loss=StopOrderRequest(
+                    stop_price=stop_loss_price, 
+                    time_in_force=TimeInForce.GTC
+                )
+            )
+            logger.info(f"Creating bracket order for {ticker}: Stop loss at ${stop_loss_price:.2f}, Take profit at ${take_profit_price:.2f}")
+            
+        elif action == "short":
+            # For short, the stop loss is above the entry price
+            stop_loss_price = current_price * (1 + RISK_PARAMS["STOP_LOSS_PCT"])
+            # For short, the take profit is below the entry price
+            take_profit_price = current_price * (1 - RISK_PARAMS["TAKE_PROFIT_PCT"])
+            
+            # Use bracket order for short orders as well
+            order_data = BracketOrderRequest(
+                symbol=ticker,
+                qty=quantity,
+                side=side,
+                type=OrderType.MARKET,
+                time_in_force=TimeInForce.DAY,
+                take_profit=LimitOrderRequest(
+                    limit_price=take_profit_price,
+                    time_in_force=TimeInForce.GTC
+                ),
+                stop_loss=StopOrderRequest(
+                    stop_price=stop_loss_price,
+                    time_in_force=TimeInForce.GTC
+                )
+            )
+            logger.info(f"Creating bracket order for short {ticker}: Stop loss at ${stop_loss_price:.2f}, Take profit at ${take_profit_price:.2f}")
+            
+        else:
+            # For sell and cover orders, use simple market orders
+            order_data = MarketOrderRequest(
+                symbol=ticker,
+                qty=quantity,
+                side=side,
+                time_in_force=TimeInForce.DAY
+            )
         
         # Submit the order
         order = client.submit_order(order_data)
         logger.info(f"Submitted {action} order for {quantity} shares of {ticker}: Order ID {order.id}")
+        
+        # Record the successful trade in our risk management system
+        record_trade_execution(ticker, action, quantity, current_price, quantity * current_price)
+        
         return True
         
     except Exception as e:
@@ -198,6 +276,12 @@ def get_alpaca_portfolio_state(client, tickers):
                     "short_margin_used": 0.0
                 }
         
+        # Calculate total portfolio value including both long and short positions
+        portfolio_value = float(account.equity)
+        
+        # Update the risk management system with the current portfolio value
+        update_portfolio_value(portfolio_value)
+        
         return portfolio
     
     except Exception as e:
@@ -226,6 +310,10 @@ def portfolio_management_agent(state: AgentState):
                 portfolio = alpaca_portfolio
                 # Update the portfolio in the state data for other agents to use
                 state["data"]["portfolio"] = portfolio
+                
+                # Initialize risk management with portfolio value if not already set
+                portfolio_value = float(alpaca_client.get_account().equity)
+                reset_daily_state(portfolio_value)
             else:
                 logger.warning("Could not get portfolio state from Alpaca, using existing portfolio data")
         else:
@@ -245,11 +333,20 @@ def portfolio_management_agent(state: AgentState):
         risk_data = analyst_signals.get("risk_management_agent", {}).get(ticker, {})
         position_limits[ticker] = risk_data.get("remaining_position_limit", 0)
         current_prices[ticker] = risk_data.get("current_price", 0)
-
-        # Calculate maximum shares allowed based on position limit and price
-        if current_prices[ticker] > 0:
-            max_shares[ticker] = int(position_limits[ticker] / current_prices[ticker])
+        
+        # Get max shares directly from risk manager if available, otherwise calculate it
+        if "max_shares" in risk_data:
+            max_shares[ticker] = risk_data.get("max_shares", 0)
         else:
+            # Calculate maximum shares allowed based on position limit and price
+            if current_prices[ticker] > 0:
+                max_shares[ticker] = int(position_limits[ticker] / current_prices[ticker])
+            else:
+                max_shares[ticker] = 0
+                
+        # Check if circuit breaker is active
+        if risk_data.get("circuit_breaker_active", False):
+            # No trades allowed when circuit breaker is active
             max_shares[ticker] = 0
 
         # Get signals for the ticker
@@ -286,20 +383,27 @@ def portfolio_management_agent(state: AgentState):
     if LIVE_TRADING_ENABLED:
         progress.update_status("portfolio_management_agent", None, "Executing live trades on Alpaca")
         
-        for ticker, decision in result.decisions.items():
-            if decision.action != "hold" and decision.quantity > 0:
-                progress.update_status(
-                    "portfolio_management_agent", 
-                    ticker, 
-                    f"Executing {decision.action} order for {decision.quantity} shares"
-                )
-                
-                success = execute_alpaca_trade(ticker, decision.action, decision.quantity)
-                
-                if success:
-                    logger.info(f"Successfully executed {decision.action} order for {decision.quantity} shares of {ticker}")
-                else:
-                    logger.warning(f"Failed to execute {decision.action} order for {decision.quantity} shares of {ticker}")
+        # Check if we've hit a circuit breaker
+        from utils.risk_manager import TODAY_STATE
+        if TODAY_STATE.get("circuit_breaker_triggered", False):
+            progress.update_status("portfolio_management_agent", None, "CIRCUIT BREAKER ACTIVE: Trading suspended")
+            logger.warning("CIRCUIT BREAKER ACTIVE: All trading is suspended for today.")
+        else:
+            # Execute trades if not in circuit breaker mode
+            for ticker, decision in result.decisions.items():
+                if decision.action != "hold" and decision.quantity > 0:
+                    progress.update_status(
+                        "portfolio_management_agent", 
+                        ticker, 
+                        f"Executing {decision.action} order for {decision.quantity} shares"
+                    )
+                    
+                    success = execute_alpaca_trade(ticker, decision.action, decision.quantity, current_prices[ticker])
+                    
+                    if success:
+                        logger.info(f"Successfully executed {decision.action} order for {decision.quantity} shares of {ticker}")
+                    else:
+                        logger.warning(f"Failed to execute {decision.action} order for {decision.quantity} shares of {ticker}")
     else:
         progress.update_status("portfolio_management_agent", None, "Live trading disabled (simulation only)")
 
@@ -344,6 +448,7 @@ def generate_trading_decision(
               - The max_shares values are pre-calculated to respect position limits
               - Consider both long and short opportunities based on signals
               - Maintain appropriate risk management with both long and short exposure
+              - Trades will have automated stop losses to protect against significant losses
 
               Available Actions:
               - "buy": Open or add to long position
