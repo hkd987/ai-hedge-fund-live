@@ -38,19 +38,35 @@ def print_trading_output(result: dict) -> None:
 
             signal = signals[ticker]
             agent_name = agent.replace("_agent", "").replace("_", " ").title()
-            signal_type = signal.get("signal", "").upper()
+            
+            # Handle both dictionary and object-style signals
+            if hasattr(signal, 'model_dump'):  # It's a Pydantic model
+                signal_dict = signal.model_dump()
+                signal_type = signal_dict.get("signal", "").upper()
+                confidence = signal_dict.get("confidence", 0)
+            elif isinstance(signal, dict):  # It's already a dictionary
+                signal_type = signal.get("signal", "").upper()
+                confidence = signal.get("confidence", 0)
+            else:  # It's a Pydantic model without model_dump
+                signal_type = getattr(signal, "signal", "").upper()
+                confidence = getattr(signal, "confidence", 0)
 
             signal_color = {
                 "BULLISH": Fore.GREEN,
                 "BEARISH": Fore.RED,
                 "NEUTRAL": Fore.YELLOW,
+                "STRONG_BUY": Fore.GREEN,
+                "BUY": Fore.GREEN,
+                "WEAK_BUY": Fore.GREEN,
+                "SELL": Fore.RED,
+                "WEAK_SELL": Fore.RED,
             }.get(signal_type, Fore.WHITE)
 
             table_data.append(
                 [
                     f"{Fore.CYAN}{agent_name}{Style.RESET_ALL}",
                     f"{signal_color}{signal_type}{Style.RESET_ALL}",
-                    f"{Fore.YELLOW}{signal.get('confidence')}%{Style.RESET_ALL}",
+                    f"{Fore.YELLOW}{confidence}%{Style.RESET_ALL}",
                 ]
             )
 
@@ -68,15 +84,32 @@ def print_trading_output(result: dict) -> None:
         )
 
         # Print Trading Decision Table
-        action = decision.get("action", "").upper()
+        # Handle both dictionary and object-style decisions
+        if hasattr(decision, 'model_dump'):  # It's a Pydantic model
+            decision_dict = decision.model_dump()
+            action = decision_dict.get("action", "").upper()
+            quantity = decision_dict.get("quantity", 0)
+            confidence = decision_dict.get("confidence", 0)
+            reasoning = decision_dict.get("reasoning", "")
+        elif isinstance(decision, dict):  # It's already a dictionary
+            action = decision.get("action", "").upper()
+            quantity = decision.get("quantity", 0)
+            confidence = decision.get("confidence", 0)
+            reasoning = decision.get("reasoning", "")
+        else:  # It's a Pydantic model without model_dump
+            action = getattr(decision, "action", "").upper()
+            quantity = getattr(decision, "quantity", 0)
+            confidence = getattr(decision, "confidence", 0)
+            reasoning = getattr(decision, "reasoning", "")
+
         action_color = {"BUY": Fore.GREEN, "SELL": Fore.RED, "HOLD": Fore.YELLOW}.get(action, Fore.WHITE)
 
         decision_data = [
             ["Action", f"{action_color}{action}{Style.RESET_ALL}"],
-            ["Quantity", f"{action_color}{decision.get('quantity')}{Style.RESET_ALL}"],
+            ["Quantity", f"{action_color}{quantity}{Style.RESET_ALL}"],
             [
                 "Confidence",
-                f"{Fore.YELLOW}{decision.get('confidence'):.1f}%{Style.RESET_ALL}",
+                f"{Fore.YELLOW}{confidence:.1f}%{Style.RESET_ALL}",
             ],
         ]
 
@@ -84,13 +117,27 @@ def print_trading_output(result: dict) -> None:
         print(tabulate(decision_data, tablefmt="grid", colalign=("left", "right")))
 
         # Print Reasoning
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}Reasoning:{Style.RESET_ALL} {Fore.CYAN}{decision.get('reasoning')}{Style.RESET_ALL}")
+        print(f"\n{Fore.WHITE}{Style.BRIGHT}Reasoning:{Style.RESET_ALL} {Fore.CYAN}{reasoning}{Style.RESET_ALL}")
 
     # Print Portfolio Summary
     print(f"\n{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY:{Style.RESET_ALL}")
     portfolio_data = []
     for ticker, decision in decisions.items():
-        action = decision.get("action", "").upper()
+        # Handle both dictionary and object-style decisions for portfolio summary
+        if hasattr(decision, 'model_dump'):  # It's a Pydantic model
+            decision_dict = decision.model_dump()
+            action = decision_dict.get("action", "").upper()
+            quantity = decision_dict.get("quantity", 0)
+            confidence = decision_dict.get("confidence", 0)
+        elif isinstance(decision, dict):  # It's already a dictionary
+            action = decision.get("action", "").upper()
+            quantity = decision.get("quantity", 0)
+            confidence = decision.get("confidence", 0)
+        else:  # It's a Pydantic model without model_dump
+            action = getattr(decision, "action", "").upper()
+            quantity = getattr(decision, "quantity", 0)
+            confidence = getattr(decision, "confidence", 0)
+        
         action_color = {
             "BUY": Fore.GREEN,
             "SELL": Fore.RED,
@@ -102,8 +149,8 @@ def print_trading_output(result: dict) -> None:
             [
                 f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
                 f"{action_color}{action}{Style.RESET_ALL}",
-                f"{action_color}{decision.get('quantity')}{Style.RESET_ALL}",
-                f"{Fore.YELLOW}{decision.get('confidence'):.1f}%{Style.RESET_ALL}",
+                f"{action_color}{quantity}{Style.RESET_ALL}",
+                f"{Fore.YELLOW}{confidence:.1f}%{Style.RESET_ALL}",
             ]
         )
 
