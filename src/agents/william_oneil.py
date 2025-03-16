@@ -513,7 +513,8 @@ def analyze_supply_demand(market_cap: float, prices_df: pd.DataFrame) -> dict:
         avg_volume = recent_data['volume'].mean()
         
         # Identify up days and down days
-        recent_data['price_change'] = recent_data['close'].diff(-1) * -1  # Reverse order to get positive for up days
+        recent_data = recent_data.copy()  # Make an explicit copy
+        recent_data.loc[:, 'price_change'] = recent_data['close'].diff(-1) * -1  # Reverse order to get positive for up days
         up_days = recent_data[recent_data['price_change'] > 0]
         down_days = recent_data[recent_data['price_change'] < 0]
         
@@ -730,11 +731,11 @@ def analyze_institutional_sponsorship(market_cap: float, prices_df: pd.DataFrame
         # Analyze volume patterns for institutional activity
         # Get shorter-term data for recent activity
         recent_days = min(20, len(prices_df))
-        recent_data = prices_df.head(recent_days)
+        recent_data = prices_df.head(recent_days).copy()  # Make an explicit copy
         
         # Look for accumulation days (price up on higher than average volume)
-        recent_data['price_change'] = recent_data['close'].diff(-1) * -1  # Positive = up day
-        recent_data['volume_ratio'] = recent_data['volume'] / avg_daily_volume
+        recent_data.loc[:, 'price_change'] = recent_data['close'].diff(-1) * -1  # Positive = up day
+        recent_data.loc[:, 'volume_ratio'] = recent_data['volume'] / avg_daily_volume
         
         # Count accumulation days (up days with above-average volume)
         accumulation_days = recent_data[(recent_data['price_change'] > 0) & 
@@ -877,9 +878,9 @@ def analyze_market_direction(market_data: pd.DataFrame) -> dict:
             
         # Calculate distribution days in last 25 sessions
         if len(market_data) >= 25:
-            recent_market = market_data.head(25)
-            recent_market['price_change'] = recent_market['close'].diff(-1) * -1
-            recent_market['volume_ratio'] = recent_market['volume'] / market_data['volume'].mean()
+            recent_market = market_data.head(25).copy()  # Make an explicit copy
+            recent_market.loc[:, 'price_change'] = recent_market['close'].diff(-1) * -1
+            recent_market.loc[:, 'volume_ratio'] = recent_market['volume'] / market_data['volume'].mean()
             
             # Count distribution days (down days on higher volume)
             distribution_days = recent_market[(recent_market['price_change'] < 0) & 
