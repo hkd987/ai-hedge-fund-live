@@ -1112,7 +1112,7 @@ def william_oneil_agent(state: AgentState):
     # Add the signal to the analyst_signals list
     state["data"]["analyst_signals"]["william_oneil_agent"] = signals
     
-    progress.update_status("william_oneil_agent", None, "Complete")
+    progress.update_status("william_oneil_agent", None, "Done")
     
     return {
         "messages": state["messages"] + [message],
