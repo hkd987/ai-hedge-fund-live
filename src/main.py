@@ -745,14 +745,72 @@ def main():
         logging.info(f"Starting scheduled hedge fund runs every {args.interval} minutes")
         logging.info(f"Portfolio checks every {args.check_interval} minutes")
         
-        while True:
-            current_time = datetime.now()
-            logging.info(f"Running hedge fund analysis at {current_time}")
+        try:
+            while True:
+                current_time = datetime.now()
+                logging.info(f"Running hedge fund analysis at {current_time}")
+                
+                # Update end date to current time for each run in scheduled mode
+                end_date = current_time.strftime("%Y-%m-%d")
+                
+                # Run the hedge fund with current settings
+                result = run_hedge_fund(
+                    tickers=tickers,
+                    start_date=start_date,
+                    end_date=end_date,
+                    portfolio=portfolio,
+                    show_reasoning=args.show_reasoning,
+                    selected_analysts=selected_analysts,
+                    model_name=model_name,
+                    model_provider=model_provider,
+                )
+                
+                # Print the trading output
+                print_trading_output(result)
+                
+                # Wait for the specified interval
+                logging.info(f"Next full analysis scheduled for {current_time + timedelta(minutes=args.interval)}")
+                
+                # Set up intermediate portfolio checks
+                check_count = args.interval // args.check_interval
+                
+                for i in range(check_count):
+                    try:
+                        # Sleep until next check
+                        time.sleep(args.check_interval * 60)
+                        
+                        if args.live and not args.dry_run:
+                            check_time = datetime.now()
+                            logging.info(f"Performing portfolio check at {check_time}")
+                            
+                            # Update portfolio status and check for any necessary adjustments
+                            # This is a lightweight check compared to the full analysis
+                            try:
+                                alpaca, portfolio = update_portfolio_status(alpaca, portfolio)
+                                # Optionally perform a quick analysis to see if any positions need adjustment
+                            except Exception as e:
+                                logging.error(f"Error during portfolio check: {e}")
+                    except KeyboardInterrupt:
+                        raise  # Re-raise to be caught by the outer try-except
+                
+                # If we didn't use all the time with checks, sleep for the remainder
+                remaining_time = args.interval - (check_count * args.check_interval)
+                if remaining_time > 0:
+                    time.sleep(remaining_time * 60)
+        except KeyboardInterrupt:
+            print(f"\n{Fore.CYAN}AI Hedge Fund application gracefully shut down.{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}All pending operations have been stopped safely.{Style.RESET_ALL}")
             
-            # Update end date to current time for each run in scheduled mode
-            end_date = current_time.strftime("%Y-%m-%d")
+            # Perform any necessary cleanup here
+            if args.live and not args.dry_run:
+                print(f"{Fore.YELLOW}Note: Your current open positions remain active in your Alpaca account.{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}Run with --emergency-liquidate if you need to close all positions.{Style.RESET_ALL}")
             
-            # Run the hedge fund with current settings
+            # Exit cleanly
+            return
+    else:
+        # Run once (original behavior)
+        try:
             result = run_hedge_fund(
                 tickers=tickers,
                 start_date=start_date,
@@ -766,48 +824,10 @@ def main():
             
             # Print the trading output
             print_trading_output(result)
-            
-            # Wait for the specified interval
-            logging.info(f"Next full analysis scheduled for {current_time + timedelta(minutes=args.interval)}")
-            
-            # Set up intermediate portfolio checks
-            check_count = args.interval // args.check_interval
-            
-            for i in range(check_count):
-                # Sleep until next check
-                time.sleep(args.check_interval * 60)
-                
-                if args.live and not args.dry_run:
-                    check_time = datetime.now()
-                    logging.info(f"Performing portfolio check at {check_time}")
-                    
-                    # Update portfolio status and check for any necessary adjustments
-                    # This is a lightweight check compared to the full analysis
-                    try:
-                        alpaca, portfolio = update_portfolio_status(alpaca, portfolio)
-                        # Optionally perform a quick analysis to see if any positions need adjustment
-                    except Exception as e:
-                        logging.error(f"Error during portfolio check: {e}")
-            
-            # If we didn't use all the time with checks, sleep for the remainder
-            remaining_time = args.interval - (check_count * args.check_interval)
-            if remaining_time > 0:
-                time.sleep(remaining_time * 60)
-    else:
-        # Run once (original behavior)
-        result = run_hedge_fund(
-            tickers=tickers,
-            start_date=start_date,
-            end_date=end_date,
-            portfolio=portfolio,
-            show_reasoning=args.show_reasoning,
-            selected_analysts=selected_analysts,
-            model_name=model_name,
-            model_provider=model_provider,
-        )
-        
-        # Print the trading output
-        print_trading_output(result)
+        except KeyboardInterrupt:
+            print(f"\n{Fore.CYAN}AI Hedge Fund application gracefully shut down.{Style.RESET_ALL}")
+            # Exit cleanly
+            return
 
 
 def run_hedge_fund(
@@ -865,8 +885,17 @@ def run_hedge_fund(
             "decisions": parse_hedge_fund_response(final_state["messages"][-1].content),
             "analyst_signals": final_state["data"]["analyst_signals"],
         }
+    except KeyboardInterrupt:
+        # Make sure progress tracker is stopped before re-raising the exception
+        progress.stop()
+        raise
+    except Exception as e:
+        # Log any errors and ensure progress tracker is stopped
+        logger.error(f"Error during hedge fund execution: {e}")
+        progress.stop()
+        raise
     finally:
-        # Stop progress tracking
+        # Stop progress tracking in all cases
         progress.stop()
 
 
