@@ -52,8 +52,9 @@ def jesse_livermore_agent(state: AgentState):
 
         prices_df = prices_to_df(prices)
         
-        # Get market cap for stock classification
-        market_cap = get_market_cap(ticker)
+        # Get market cap for liquidity assessment (Livermore focused on liquid stocks)
+        progress.update_status("jesse_livermore_agent", ticker, "Getting market cap")
+        market_cap = get_market_cap(ticker, end_date=data["end_date"])
 
         # Run analysis specifically tailored to Livermore's methodology
         progress.update_status("jesse_livermore_agent", ticker, "Identifying pivot points")

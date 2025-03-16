@@ -53,10 +53,10 @@ def mark_minervini_agent(state: AgentState):
 
         # Get financial metrics for earnings growth analysis
         progress.update_status("mark_minervini_agent", ticker, "Analyzing fundamentals")
-        metrics = get_financial_metrics(ticker)
+        metrics = get_financial_metrics(ticker, end_date=data["end_date"])
         
         # Get market cap for stock classification
-        market_cap = get_market_cap(ticker)
+        market_cap = get_market_cap(ticker, end_date=data["end_date"])
 
         # Run technical analysis specifically tailored to Minervini's SEPA methodology
         progress.update_status("mark_minervini_agent", ticker, "Performing SEPA analysis")

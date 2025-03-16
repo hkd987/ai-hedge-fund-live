@@ -58,7 +58,8 @@ def linda_raschke_agent(state: AgentState):
         news = get_company_news(ticker=ticker)
         
         # Get financial metrics for additional context
-        metrics = get_financial_metrics(ticker=ticker)
+        progress.update_status("linda_raschke_agent", ticker, "Analyzing fundamentals")
+        metrics = get_financial_metrics(ticker=ticker, end_date=end_date)
 
         # Analyze with Raschke's strategies
         progress.update_status("linda_raschke_agent", ticker, "Analyzing with Holy Grail setup")

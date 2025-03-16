@@ -56,18 +56,19 @@ def pull_stock_data(ticker: str, date_range: Dict[str, str]) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def pull_financial_metrics(ticker: str) -> Dict:
+def pull_financial_metrics(ticker: str, end_date: str) -> Dict:
     """
     Pull financial metrics for the given ticker.
     
     Args:
         ticker: Stock symbol
+        end_date: The end date for financial metrics
         
     Returns:
         Dictionary with financial metrics
     """
     try:
-        metrics = get_financial_metrics(ticker=ticker)
+        metrics = get_financial_metrics(ticker=ticker, end_date=end_date)
         if not metrics:
             logger.warning(f"No financial metrics found for {ticker}")
             return {}
@@ -100,19 +101,20 @@ def pull_recent_news(ticker: str) -> List[Dict]:
         return []
 
 
-def get_market_cap_data(ticker: str) -> Optional[float]:
+def get_market_cap_data(ticker: str, end_date: str) -> Optional[float]:
     """
     Get market capitalization for the given ticker.
     
     Args:
         ticker: Stock symbol
+        end_date: The end date for market cap data
         
     Returns:
         Market cap as a float, or None if not available
     """
     try:
         # Use the directly imported get_market_cap function
-        market_cap = get_market_cap(ticker=ticker)
+        market_cap = get_market_cap(ticker=ticker, end_date=end_date)
         if market_cap is None:
             logger.warning(f"No market cap found for {ticker}")
             return None
@@ -976,9 +978,9 @@ def william_oneil_agent(state: AgentState):
         
         # Get the data for the ticker
         prices_df = pull_stock_data(ticker, date_range)
-        metrics = pull_financial_metrics(ticker)
+        metrics = pull_financial_metrics(ticker, end_date)
         news = pull_recent_news(ticker)
-        market_cap = get_market_cap_data(ticker)
+        market_cap = get_market_cap_data(ticker, end_date)
         
         progress.update_status("william_oneil_agent", ticker, "Applying CANSLIM methodology")
         
