@@ -9,6 +9,7 @@ from typing_extensions import Literal
 from tools.api import get_prices, prices_to_df, get_financial_metrics, get_market_cap
 from utils.llm import call_llm
 from utils.progress import progress
+from datetime import datetime, timedelta
 
 
 class PaulTudorJonesSignal(BaseModel):
@@ -39,7 +40,13 @@ def paul_tudor_jones_agent(state: AgentState):
     for ticker in tickers:
         progress.update_status("paul_tudor_jones_agent", ticker, "Fetching price data")
         # Get price data for technical analysis
-        prices = get_prices(ticker, end_date=end_date, days=180)  # 6 months of data
+        # Calculate start_date by subtracting 180 days from end_date
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+        start_date_obj = end_date_obj - timedelta(days=180)
+        start_date = start_date_obj.strftime("%Y-%m-%d")
+        
+        # Call get_prices with start_date and end_date instead of days parameter
+        prices = get_prices(ticker, start_date=start_date, end_date=end_date)  # 6 months of data
         
         if not prices:
             progress.update_status("paul_tudor_jones_agent", ticker, "Failed: No price data found")
