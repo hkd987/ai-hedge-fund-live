@@ -4,6 +4,7 @@ from agents.ben_graham import ben_graham_agent
 from agents.bill_ackman import bill_ackman_agent
 from agents.cathie_wood import cathie_wood_agent
 from agents.charlie_munger import charlie_munger_agent
+from agents.fundamentals import fundamentals_agent
 from agents.jesse_livermore import jesse_livermore_agent
 from agents.mark_minervini import mark_minervini_agent
 from agents.paul_tudor_jones import paul_tudor_jones_agent

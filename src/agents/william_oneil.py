@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 # Local imports
-from utils.agent_utils import AgentState, show_agent_reasoning
+from graph.state import AgentState, show_agent_reasoning
 from utils.progress import progress
 from utils.llm import call_llm
 
@@ -20,7 +20,6 @@ from tools.api import (
     prices_to_df, 
     get_financial_metrics, 
     get_company_news,
-    get_company_info,
     get_market_cap
 )
 
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class WilliamONeilSignal(BaseModel):
-    signal: Literal["bullish", "bearish", "neutral"]
+    signal: Literal["strong_buy", "buy", "weak_buy", "neutral", "weak_sell", "sell"]
     confidence: float
     reasoning: str
 
@@ -101,7 +100,7 @@ def pull_recent_news(ticker: str) -> List[Dict]:
         return []
 
 
-def get_market_cap(ticker: str) -> Optional[float]:
+def get_market_cap_data(ticker: str) -> Optional[float]:
     """
     Get market capitalization for the given ticker.
     
@@ -112,12 +111,13 @@ def get_market_cap(ticker: str) -> Optional[float]:
         Market cap as a float, or None if not available
     """
     try:
-        info = get_company_info(ticker=ticker)
-        if not info or 'marketCap' not in info:
+        # Use the directly imported get_market_cap function
+        market_cap = get_market_cap(ticker=ticker)
+        if market_cap is None:
             logger.warning(f"No market cap found for {ticker}")
             return None
             
-        return float(info['marketCap'])
+        return market_cap
     except Exception as e:
         logger.error(f"Error getting market cap for {ticker}: {str(e)}")
         return None
@@ -955,11 +955,16 @@ def william_oneil_agent(state: AgentState):
     O'Neil looks for strong growth stocks with exceptional earnings, emerging products,
     limited supply, institutional accumulation, industry leadership, and supportive market conditions.
     """
+    progress.update_status("william_oneil_agent", None, "Starting CANSLIM analysis")
+    
     # Get the ticker and date range from the state
-    tickers = state.tickers
-    date_range = state.date_range
+    tickers = state["data"]["tickers"]
+    start_date = state["data"]["start_date"]
+    end_date = state["data"]["end_date"]
+    date_range = {"start_date": start_date, "end_date": end_date}
     
     # Get market data (using SPY as proxy for market)
+    progress.update_status("william_oneil_agent", None, "Analyzing market direction")
     market_data = pull_stock_data("SPY", date_range)
     market_direction = analyze_market_direction(market_data)
     
@@ -967,11 +972,15 @@ def william_oneil_agent(state: AgentState):
     signals = {}
     
     for ticker in tickers:
+        progress.update_status("william_oneil_agent", ticker, "Gathering data")
+        
         # Get the data for the ticker
         prices_df = pull_stock_data(ticker, date_range)
         metrics = pull_financial_metrics(ticker)
         news = pull_recent_news(ticker)
-        market_cap = get_market_cap(ticker)
+        market_cap = get_market_cap_data(ticker)
+        
+        progress.update_status("william_oneil_agent", ticker, "Applying CANSLIM methodology")
         
         # Analyze each CANSLIM component
         c_analysis = analyze_current_earnings(metrics)
@@ -1023,6 +1032,8 @@ def william_oneil_agent(state: AgentState):
             canslim_score = weighted_sum / total_weight
         else:
             canslim_score = 50  # Neutral if no data
+            
+        progress.update_status("william_oneil_agent", ticker, "Generating signal")
             
         # Determine O'Neil's signal based on CANSLIM score
         if canslim_score >= 80:
@@ -1082,13 +1093,25 @@ def william_oneil_agent(state: AgentState):
         
         # Add to signals dictionary
         signals[ticker] = oneil_signal
-    
-    # Update the agent state with the signals
-    state.signals = signals
+        
+        progress.update_status("william_oneil_agent", ticker, "Done")
     
     # Create a message to return to the system
     message = HumanMessage(
-        content=f"William O'Neil has analyzed {len(tickers)} stocks using his CANSLIM methodology."
+        content=json.dumps({ticker: signal.model_dump() for ticker, signal in signals.items()}),
+        name="william_oneil_agent",
     )
     
-    return message 
+    # Show reasoning if requested
+    if state["metadata"]["show_reasoning"]:
+        show_agent_reasoning({ticker: signal.model_dump() for ticker, signal in signals.items()}, "William O'Neil Agent")
+    
+    # Add the signal to the analyst_signals list
+    state["data"]["analyst_signals"]["william_oneil_agent"] = signals
+    
+    progress.update_status("william_oneil_agent", None, "Complete")
+    
+    return {
+        "messages": state["messages"] + [message],
+        "data": state["data"],
+    } 
