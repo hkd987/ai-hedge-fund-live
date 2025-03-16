@@ -516,7 +516,24 @@ def portfolio_management_agent(state: AgentState):
         ticker_signals = {}
         for agent, signals in analyst_signals.items():
             if agent != "risk_management_agent" and ticker in signals:
-                ticker_signals[agent] = {"signal": signals[ticker]["signal"], "confidence": signals[ticker]["confidence"]}
+                # Handle both dictionary-style and object-style signals (Pydantic models)
+                signal_obj = signals[ticker]
+                if hasattr(signal_obj, 'model_dump'):  # It's a Pydantic model
+                    signal_dict = signal_obj.model_dump()
+                    ticker_signals[agent] = {
+                        "signal": signal_dict.get("signal", "neutral"),
+                        "confidence": signal_dict.get("confidence", 0.0)
+                    }
+                elif isinstance(signal_obj, dict):  # It's already a dictionary
+                    ticker_signals[agent] = {
+                        "signal": signal_obj.get("signal", "neutral"),
+                        "confidence": signal_obj.get("confidence", 0.0)
+                    }
+                else:  # It's a Pydantic model but doesn't have model_dump (older version)
+                    ticker_signals[agent] = {
+                        "signal": getattr(signal_obj, "signal", "neutral"),
+                        "confidence": getattr(signal_obj, "confidence", 0.0)
+                    }
         signals_by_ticker[ticker] = ticker_signals
 
     progress.update_status("portfolio_management_agent", None, "Making trading decisions")
