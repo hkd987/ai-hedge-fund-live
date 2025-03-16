@@ -494,6 +494,26 @@ def calculate_risk_levels(prices_df: pd.DataFrame) -> dict:
     }
 
 
+def convert_to_serializable(obj):
+    """
+    Convert NumPy types to standard Python types for JSON serialization.
+    """
+    if isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return convert_to_serializable(obj.tolist())
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    else:
+        return obj
+
+
 def generate_minervini_output(
     ticker: str,
     analysis_data: dict,
@@ -552,18 +572,21 @@ def generate_minervini_output(
         ]
     )
     
+    # Convert analysis data to serializable format
+    serializable_data = convert_to_serializable(analysis_data)
+    
     # Format the prompt with the analysis data
     prompt = template.invoke(
         {
             "ticker": ticker,
-            "current_price": analysis_data["current_price"],
-            "market_cap": analysis_data["market_cap"],
-            "sepa_criteria": json.dumps(analysis_data["sepa_criteria"], indent=2),
-            "earnings_growth": json.dumps(analysis_data["earnings_growth"], indent=2),
-            "relative_strength": json.dumps(analysis_data["relative_strength"], indent=2),
-            "pattern_analysis": json.dumps(analysis_data["pattern_analysis"], indent=2),
-            "volume_analysis": json.dumps(analysis_data["volume_analysis"], indent=2),
-            "risk_analysis": json.dumps(analysis_data["risk_analysis"], indent=2),
+            "current_price": serializable_data["current_price"],
+            "market_cap": serializable_data["market_cap"],
+            "sepa_criteria": json.dumps(serializable_data["sepa_criteria"], indent=2),
+            "earnings_growth": json.dumps(serializable_data["earnings_growth"], indent=2),
+            "relative_strength": json.dumps(serializable_data["relative_strength"], indent=2),
+            "pattern_analysis": json.dumps(serializable_data["pattern_analysis"], indent=2),
+            "volume_analysis": json.dumps(serializable_data["volume_analysis"], indent=2),
+            "risk_analysis": json.dumps(serializable_data["risk_analysis"], indent=2),
         }
     )
     
