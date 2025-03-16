@@ -122,6 +122,12 @@ def print_trading_output(result: dict) -> None:
     # Print Portfolio Summary
     print(f"\n{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY:{Style.RESET_ALL}")
     portfolio_data = []
+    
+    # Calculate total portfolio value if available from the result
+    total_portfolio_value = 0
+    if "portfolio_value" in result:
+        total_portfolio_value = result["portfolio_value"]
+    
     for ticker, decision in decisions.items():
         # Handle both dictionary and object-style decisions for portfolio summary
         if hasattr(decision, 'model_dump'):  # It's a Pydantic model
@@ -138,6 +144,17 @@ def print_trading_output(result: dict) -> None:
             quantity = getattr(decision, "quantity", 0)
             confidence = getattr(decision, "confidence", 0)
         
+        # Get current price if available
+        current_price = 0
+        if "current_prices" in result and ticker in result["current_prices"]:
+            current_price = result["current_prices"][ticker]
+        
+        # Calculate position value and percentage
+        position_value = quantity * current_price
+        position_pct = 0
+        if total_portfolio_value > 0 and position_value > 0:
+            position_pct = (position_value / total_portfolio_value) * 100
+        
         action_color = {
             "BUY": Fore.GREEN,
             "SELL": Fore.RED,
@@ -145,21 +162,31 @@ def print_trading_output(result: dict) -> None:
             "COVER": Fore.GREEN,
             "SHORT": Fore.RED,
         }.get(action, Fore.WHITE)
+        
         portfolio_data.append(
             [
                 f"{Fore.CYAN}{ticker}{Style.RESET_ALL}",
                 f"{action_color}{action}{Style.RESET_ALL}",
                 f"{action_color}{quantity}{Style.RESET_ALL}",
                 f"{Fore.YELLOW}{confidence:.1f}%{Style.RESET_ALL}",
+                f"{Fore.WHITE}${position_value:.2f}{Style.RESET_ALL}" if current_price > 0 else "N/A",
+                f"{Fore.MAGENTA}{position_pct:.2f}%{Style.RESET_ALL}" if position_pct > 0 else "N/A",
             ]
         )
 
     print(
         tabulate(
             portfolio_data,
-            headers=[f"{Fore.WHITE}Ticker", "Action", "Quantity", "Confidence"],
+            headers=[
+                f"{Fore.WHITE}Ticker", 
+                "Action", 
+                "Quantity", 
+                "Confidence", 
+                "Position Value", 
+                "% of Portfolio"
+            ],
             tablefmt="grid",
-            colalign=("left", "center", "right", "right"),
+            colalign=("left", "center", "right", "right", "right", "right"),
         )
     )
 

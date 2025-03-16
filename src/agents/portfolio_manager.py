@@ -161,6 +161,13 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
                         logger.info(f"Adjusting cover quantity from {quantity} to {abs(current_qty)} for {ticker}")
                         quantity = abs(current_qty)
                 
+                # Handle short (creating a short position or adding to existing short)
+                elif action == "short":
+                    if current_qty < 0:  # Already have a short position
+                        # Check if this would exceed our maximum short target
+                        # This is a safety check to prevent doubling up on shorts
+                        logger.info(f"Already have a short position of {abs(current_qty)} shares for {ticker}")
+                        # You can add additional logic here if needed
             except Exception as e:
                 # Position doesn't exist
                 if action == "cover":
@@ -168,6 +175,37 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
                     return False
                 elif action == "short":
                     # This is a new short position, no special handling needed
+                    pass
+        
+        # For buy and sell, verify the current position
+        elif action in ["buy", "sell"]:
+            try:
+                position = client.get_position(ticker)
+                current_qty = int(position.qty)
+                
+                # Handle sell (closing a long position)
+                if action == "sell":
+                    if current_qty <= 0:  # Not a long position
+                        logger.warning(f"Cannot sell {ticker}: No long position exists")
+                        return False
+                    
+                    # Limit quantity to current long position
+                    if current_qty < quantity:
+                        logger.info(f"Adjusting sell quantity from {quantity} to {current_qty} for {ticker}")
+                        quantity = current_qty
+                
+                # Handle buy (creating or adding to a long position)
+                elif action == "buy":
+                    if current_qty > 0:
+                        # We already have a long position, just informational
+                        logger.info(f"Adding to existing long position of {current_qty} shares for {ticker}")
+            except Exception as e:
+                # Position doesn't exist
+                if action == "sell":
+                    logger.warning(f"Cannot sell {ticker}: No position exists")
+                    return False
+                elif action == "buy":
+                    # This is a new buy position, no special handling needed
                     pass
         
         # Calculate stop loss and take profit prices using dynamic ATR-based values if available
@@ -573,6 +611,46 @@ def portfolio_management_agent(state: AgentState):
             # Execute trades if not in circuit breaker mode
             for ticker, decision in result.decisions.items():
                 if decision.action != "hold" and decision.quantity > 0:
+                    # Validate the decision against current portfolio positions to prevent double selling/shorting
+                    current_position = portfolio.get("positions", {}).get(ticker, {})
+                    current_long = current_position.get("long", 0)
+                    current_short = current_position.get("short", 0)
+                    
+                    # Validate the decision
+                    invalid_decision = False
+                    
+                    # Check for invalid sell (trying to sell more than owned)
+                    if decision.action == "sell" and decision.quantity > current_long:
+                        logger.warning(f"Invalid decision for {ticker}: Cannot sell {decision.quantity} shares when only {current_long} owned")
+                        decision.quantity = current_long
+                        if decision.quantity == 0:
+                            decision.action = "hold"
+                            invalid_decision = True
+                    
+                    # Check for invalid cover (trying to cover more than shorted)
+                    elif decision.action == "cover" and decision.quantity > current_short:
+                        logger.warning(f"Invalid decision for {ticker}: Cannot cover {decision.quantity} shares when only {current_short} shorted")
+                        decision.quantity = current_short
+                        if decision.quantity == 0:
+                            decision.action = "hold"
+                            invalid_decision = True
+                    
+                    # Check for attempting to sell when nothing is owned
+                    elif decision.action == "sell" and current_long <= 0:
+                        logger.warning(f"Invalid decision for {ticker}: Cannot sell when no shares are owned")
+                        decision.action = "hold"
+                        invalid_decision = True
+                    
+                    # Check for attempting to cover when nothing is shorted
+                    elif decision.action == "cover" and current_short <= 0:
+                        logger.warning(f"Invalid decision for {ticker}: Cannot cover when no shares are shorted")
+                        decision.action = "hold"
+                        invalid_decision = True
+                    
+                    if invalid_decision:
+                        progress.update_status("portfolio_management_agent", ticker, f"Invalid decision corrected to {decision.action}")
+                        continue
+                    
                     # First perform time-based risk check for earnings and market hours
                     risk_adjustment_needed = False
                     risk_reasons = []
@@ -677,6 +755,13 @@ def generate_trading_decision(
                 * Cover quantity must be ≤ current short position shares
                 * Short quantity must respect margin requirements
               
+              - Position validation requirements:
+                * CRITICALLY IMPORTANT: DO NOT double sell positions
+                * CRITICALLY IMPORTANT: DO NOT double short positions
+                * If the current position already matches your intended action (e.g., already sold or already shorted), use "hold" instead
+                * Verify existing positions before making sell/cover decisions
+                * Only suggest actionable trades
+
               - The max_shares values are pre-calculated to respect position limits
               - Consider both long and short opportunities based on signals
               - Maintain appropriate risk management with both long and short exposure

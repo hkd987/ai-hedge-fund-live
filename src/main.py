@@ -1,5 +1,7 @@
 import sys
 import os
+import time
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
@@ -23,7 +25,6 @@ from llm.models import LLM_ORDER, get_model_info
 from utils.market_data import get_current_vix, get_market_status, ALPACA_AVAILABLE as MARKET_DATA_AVAILABLE
 
 import argparse
-from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from tabulate import tabulate
 from utils.visualize import save_graph_as_png
@@ -349,7 +350,466 @@ def check_market_conditions():
     return conditions
 
 
-##### Run the Hedge Fund #####
+def start(state: AgentState):
+    """Initialize the workflow with the input message."""
+    return state
+
+
+def create_workflow(selected_analysts=None):
+    """Create the workflow with selected analysts."""
+    workflow = StateGraph(AgentState)
+    workflow.add_node("start_node", start)
+
+    # Get analyst nodes from the configuration
+    analyst_nodes = get_analyst_nodes()
+
+    # Default to all analysts if none selected
+    if selected_analysts is None:
+        selected_analysts = list(analyst_nodes.keys())
+    # Add selected analyst nodes
+    for analyst_key in selected_analysts:
+        node_name, node_func = analyst_nodes[analyst_key]
+        workflow.add_node(node_name, node_func)
+        workflow.add_edge("start_node", node_name)
+
+    # Always add risk and portfolio management
+    workflow.add_node("risk_management_agent", risk_management_agent)
+    workflow.add_node("portfolio_management_agent", portfolio_management_agent)
+
+    # Connect selected analysts to risk management
+    for analyst_key in selected_analysts:
+        node_name = analyst_nodes[analyst_key][0]
+        workflow.add_edge(node_name, "risk_management_agent")
+
+    workflow.add_edge("risk_management_agent", "portfolio_management_agent")
+    workflow.add_edge("portfolio_management_agent", END)
+
+    workflow.set_entry_point("start_node")
+    return workflow
+
+
+# Create the default workflow and compile it
+def create_default_workflow():
+    """Create the default workflow with all analysts."""
+    return create_workflow()
+
+# Compile the default workflow
+app = create_default_workflow().compile()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="AI Hedge Fund")
+    parser.add_argument(
+        "--ticker",
+        type=str,
+        help="Comma-separated list of ticker symbols (e.g., AAPL,MSFT,GOOGL)",
+    )
+    parser.add_argument(
+        "--show-reasoning",
+        action="store_true",
+        help="Show reasoning behind the decisions",
+    )
+    parser.add_argument(
+        "--selected-analysts",
+        type=str,
+        help="Comma-separated list of analysts to use (e.g. warren_buffett,bill_ackman)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="gpt-4o",
+        help="Model name to use (e.g., gpt-4o, claude-3-5-sonnet)",
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="OpenAI",
+        help="Model provider (e.g., OpenAI, ANTHROPIC, GROQ)",
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        help="Start date in YYYY-MM-DD format (default: 3 months ago)",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        help="End date in YYYY-MM-DD format (default: today)",
+    )
+    parser.add_argument(
+        "--emergency-liquidate",
+        action="store_true",
+        help="Emergency liquidate all positions",
+    )
+    parser.add_argument(
+        "--include-alpaca-holdings",
+        action="store_true",
+        help="Include current holdings from Alpaca account",
+    )
+    parser.add_argument(
+        "--initial-cash",
+        type=float,
+        default=100000.0,
+        help="Initial cash in the portfolio (default: 100000.0)",
+    )
+    parser.add_argument(
+        "--margin-requirement",
+        type=float,
+        default=0.0,
+        help="Initial margin requirement (default: 0.0)",
+    )
+    parser.add_argument(
+        "--save-graph",
+        action="store_true",
+        help="Save the agent workflow graph as a PNG file",
+    )
+    parser.add_argument(
+        "--schedule",
+        "-s",
+        action="store_true",
+        help="Run the hedge fund every 60 minutes automatically",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help="Interval in minutes between scheduled runs (default: 60)",
+    )
+    parser.add_argument(
+        "--check-interval",
+        type=int,
+        default=20,
+        help="Interval in minutes to check portfolio between full runs",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Use live trading with Alpaca",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for the API server",
+    )
+    parser.add_argument(
+        "--max-positions",
+        type=int,
+        default=3,
+        help="Maximum number of concurrent positions",
+    )
+    parser.add_argument(
+        "--api",
+        action="store_true",
+        help="Run the API server",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run without making actual trades",
+    )
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        help="Run with paper trading",
+    )
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="Run in backtest mode",
+    )
+    return parser.parse_args()
+
+
+def update_portfolio_status(alpaca_client, portfolio):
+    """
+    Update portfolio status between full analysis runs.
+    Gets latest position information and prices from Alpaca.
+    
+    Args:
+        alpaca_client: Initialized Alpaca client
+        portfolio: Current portfolio state
+        
+    Returns:
+        tuple: (alpaca_client, updated_portfolio)
+    """
+    if not alpaca_client:
+        logging.warning("No Alpaca client available. Cannot update portfolio status.")
+        return alpaca_client, portfolio
+    
+    try:
+        # Get account information for cash balance
+        account = alpaca_client.get_account()
+        portfolio["cash"] = float(account.cash)
+        
+        # Get all current positions
+        positions = alpaca_client.get_all_positions()
+        current_positions = {position.symbol: position for position in positions}
+        
+        # Update position data for each ticker in the portfolio
+        for ticker in portfolio["positions"]:
+            if ticker in current_positions:
+                position = current_positions[ticker]
+                qty = int(position.qty)
+                
+                # Update position details based on current data
+                if qty > 0:  # Long position
+                    portfolio["positions"][ticker]["long"] = qty
+                    portfolio["positions"][ticker]["long_cost_basis"] = float(position.cost_basis) / qty
+                    portfolio["positions"][ticker]["short"] = 0
+                    portfolio["positions"][ticker]["short_cost_basis"] = 0.0
+                elif qty < 0:  # Short position
+                    short_qty = abs(qty)
+                    portfolio["positions"][ticker]["short"] = short_qty
+                    portfolio["positions"][ticker]["short_cost_basis"] = float(position.cost_basis) / short_qty
+                    portfolio["positions"][ticker]["long"] = 0
+                    portfolio["positions"][ticker]["long_cost_basis"] = 0.0
+                    # Update margin used
+                    portfolio["positions"][ticker]["short_margin_used"] = float(position.market_value) * 0.5
+            else:
+                # No current position for this ticker
+                portfolio["positions"][ticker]["long"] = 0
+                portfolio["positions"][ticker]["short"] = 0
+        
+        # Calculate total portfolio value and update
+        portfolio_value = float(account.equity)
+        portfolio["portfolio_value"] = portfolio_value
+        
+        # Calculate current prices for all tickers in the portfolio
+        current_prices = {}
+        for ticker in portfolio["positions"]:
+            # Try to get current price from existing position
+            if ticker in current_positions:
+                position = current_positions[ticker]
+                qty = abs(int(position.qty))
+                if qty > 0:
+                    current_prices[ticker] = float(position.market_value) / qty
+        
+        # Store current prices in the portfolio
+        portfolio["current_prices"] = current_prices
+        
+        logging.info(f"Portfolio updated: ${portfolio_value:.2f} total value, ${portfolio['cash']:.2f} cash")
+        return alpaca_client, portfolio
+        
+    except Exception as e:
+        logging.error(f"Error updating portfolio status: {e}")
+        return alpaca_client, portfolio
+
+
+def init_portfolio():
+    """
+    Initialize portfolio and Alpaca client for live trading.
+    
+    Returns:
+        tuple: (alpaca_client, portfolio)
+    """
+    alpaca_client = get_alpaca_client()
+    portfolio = {}
+    
+    if alpaca_client:
+        try:
+            # Get account info
+            account = alpaca_client.get_account()
+            
+            # Initialize basic portfolio structure
+            portfolio = {
+                "cash": float(account.cash),
+                "portfolio_value": float(account.equity),
+                "positions": {},
+                "realized_gains": {},
+                "current_prices": {}
+            }
+            
+            # Get all positions
+            positions = alpaca_client.get_all_positions()
+            
+            # Initialize empty positions and realized gains for all positions
+            for position in positions:
+                ticker = position.symbol
+                portfolio["positions"][ticker] = {
+                    "long": 0,
+                    "short": 0,
+                    "long_cost_basis": 0.0,
+                    "short_cost_basis": 0.0,
+                    "short_margin_used": 0.0
+                }
+                portfolio["realized_gains"][ticker] = {
+                    "long": 0.0,
+                    "short": 0.0
+                }
+            
+            # Update with actual position data
+            alpaca_client, portfolio = update_portfolio_status(alpaca_client, portfolio)
+            
+        except Exception as e:
+            logging.error(f"Error initializing portfolio: {e}")
+            portfolio = {
+                "cash": 10000.0,  # Default cash value
+                "portfolio_value": 10000.0,
+                "positions": {},
+                "realized_gains": {},
+                "current_prices": {}
+            }
+    else:
+        # No Alpaca client, use default portfolio
+        portfolio = {
+            "cash": 10000.0,
+            "portfolio_value": 10000.0,
+            "positions": {},
+            "realized_gains": {},
+            "current_prices": {}
+        }
+    
+    return alpaca_client, portfolio
+
+
+def main():
+    args = parse_args()
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Handle emergency liquidation first if requested
+    if args.emergency_liquidate:
+        confirmed = questionary.confirm("Are you sure you want to EMERGENCY LIQUIDATE ALL POSITIONS?").ask()
+        if confirmed:
+            success = emergency_liquidate_all_positions()
+            if success:
+                print(f"{Fore.GREEN}Emergency liquidation completed.{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}Emergency liquidation failed.{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}Emergency liquidation cancelled.{Style.RESET_ALL}")
+        return
+
+    if not args.ticker:
+        print(f"{Fore.RED}No ticker provided. Use --ticker SYMBOL,SYMBOL2,... to specify tickers{Style.RESET_ALL}")
+        return
+
+    tickers = args.ticker.split(',')
+    
+    # Select analysts if not specified in command line
+    selected_analysts = []
+    if args.selected_analysts:
+        selected_analysts = args.selected_analysts.split(',')
+    else:
+        print(f"{Fore.CYAN}Select analysts to include in the analysis (Space to select, Enter to confirm):{Style.RESET_ALL}")
+        choices = questionary.checkbox(
+            "Select analysts:",
+            choices=[questionary.Choice(display, value=value) for display, value in ANALYST_ORDER],
+            style=questionary.Style([
+                ("selected", "bg:blue fg:white"),
+                ("checkbox", "bg:blue fg:white"),
+            ]),
+        ).ask()
+        
+        if choices:
+            selected_analysts = choices
+            print(f"{Fore.GREEN}Selected analysts: {', '.join(selected_analysts)}{Style.RESET_ALL}")
+        else:
+            # If no analysts selected, use all
+            selected_analysts = [value for _, value in ANALYST_ORDER]
+            print(f"{Fore.YELLOW}No analysts selected, using all analysts.{Style.RESET_ALL}")
+    
+    # Select model if not specified
+    model_name = args.model
+    model_provider = args.provider
+    
+    if args.api:
+        # ... existing API server code ...
+        return
+    
+    # Initialize portfolio for live trading
+    if args.live:
+        alpaca, portfolio = init_portfolio()
+    else:
+        portfolio = {}
+    
+    # Set default start and end dates if not provided
+    end_date = args.end_date
+    if not end_date:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    
+    start_date = args.start_date
+    if not start_date:
+        # Default to 3 months before end date
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+        start_date = (end_date_obj - timedelta(days=90)).strftime("%Y-%m-%d")
+    
+    # If schedule flag is set, run the hedge fund at regular intervals
+    if args.schedule:
+        logging.info(f"Starting scheduled hedge fund runs every {args.interval} minutes")
+        logging.info(f"Portfolio checks every {args.check_interval} minutes")
+        
+        while True:
+            current_time = datetime.now()
+            logging.info(f"Running hedge fund analysis at {current_time}")
+            
+            # Update end date to current time for each run in scheduled mode
+            end_date = current_time.strftime("%Y-%m-%d")
+            
+            # Run the hedge fund with current settings
+            result = run_hedge_fund(
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                portfolio=portfolio,
+                show_reasoning=args.show_reasoning,
+                selected_analysts=selected_analysts,
+                model_name=model_name,
+                model_provider=model_provider,
+            )
+            
+            # Print the trading output
+            print_trading_output(result)
+            
+            # Wait for the specified interval
+            logging.info(f"Next full analysis scheduled for {current_time + timedelta(minutes=args.interval)}")
+            
+            # Set up intermediate portfolio checks
+            check_count = args.interval // args.check_interval
+            
+            for i in range(check_count):
+                # Sleep until next check
+                time.sleep(args.check_interval * 60)
+                
+                if args.live and not args.dry_run:
+                    check_time = datetime.now()
+                    logging.info(f"Performing portfolio check at {check_time}")
+                    
+                    # Update portfolio status and check for any necessary adjustments
+                    # This is a lightweight check compared to the full analysis
+                    try:
+                        alpaca, portfolio = update_portfolio_status(alpaca, portfolio)
+                        # Optionally perform a quick analysis to see if any positions need adjustment
+                    except Exception as e:
+                        logging.error(f"Error during portfolio check: {e}")
+            
+            # If we didn't use all the time with checks, sleep for the remainder
+            remaining_time = args.interval - (check_count * args.check_interval)
+            if remaining_time > 0:
+                time.sleep(remaining_time * 60)
+    else:
+        # Run once (original behavior)
+        result = run_hedge_fund(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            portfolio=portfolio,
+            show_reasoning=args.show_reasoning,
+            selected_analysts=selected_analysts,
+            model_name=model_name,
+            model_provider=model_provider,
+        )
+        
+        # Print the trading output
+        print_trading_output(result)
+
+
 def run_hedge_fund(
     tickers: list[str],
     start_date: str,
@@ -369,6 +829,7 @@ def run_hedge_fund(
             workflow = create_workflow(selected_analysts)
             agent = workflow.compile()
         else:
+            # Use the default compiled app
             agent = app
             
         # Check market conditions if in live trading mode
@@ -409,266 +870,5 @@ def run_hedge_fund(
         progress.stop()
 
 
-def start(state: AgentState):
-    """Initialize the workflow with the input message."""
-    return state
-
-
-def create_workflow(selected_analysts=None):
-    """Create the workflow with selected analysts."""
-    workflow = StateGraph(AgentState)
-    workflow.add_node("start_node", start)
-
-    # Get analyst nodes from the configuration
-    analyst_nodes = get_analyst_nodes()
-
-    # Default to all analysts if none selected
-    if selected_analysts is None:
-        selected_analysts = list(analyst_nodes.keys())
-    # Add selected analyst nodes
-    for analyst_key in selected_analysts:
-        node_name, node_func = analyst_nodes[analyst_key]
-        workflow.add_node(node_name, node_func)
-        workflow.add_edge("start_node", node_name)
-
-    # Always add risk and portfolio management
-    workflow.add_node("risk_management_agent", risk_management_agent)
-    workflow.add_node("portfolio_management_agent", portfolio_management_agent)
-
-    # Connect selected analysts to risk management
-    for analyst_key in selected_analysts:
-        node_name = analyst_nodes[analyst_key][0]
-        workflow.add_edge(node_name, "risk_management_agent")
-
-    workflow.add_edge("risk_management_agent", "portfolio_management_agent")
-    workflow.add_edge("portfolio_management_agent", END)
-
-    workflow.set_entry_point("start_node")
-    return workflow
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the hedge fund trading system")
-    parser.add_argument(
-        "--initial-cash",
-        type=float,
-        default=100000.0,
-        help="Initial cash position. Defaults to 100000.0)"
-    )
-    parser.add_argument(
-        "--margin-requirement",
-        type=float,
-        default=0.0,
-        help="Initial margin requirement. Defaults to 0.0"
-    )
-    parser.add_argument("--tickers", type=str, required=False, help="Comma-separated list of stock ticker symbols")
-    parser.add_argument(
-        "--include-alpaca-holdings",
-        action="store_true",
-        help="Include all current holdings from Alpaca account in addition to tickers specified"
-    )
-    parser.add_argument(
-        "--start-date",
-        type=str,
-        help="Start date (YYYY-MM-DD). Defaults to 3 months before end date",
-    )
-    parser.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD). Defaults to today")
-    parser.add_argument("--show-reasoning", action="store_true", help="Show reasoning from each agent")
-    parser.add_argument(
-        "--show-agent-graph", action="store_true", help="Show the agent graph"
-    )
-    parser.add_argument(
-        "--emergency-liquidate",
-        action="store_true",
-        help="Emergency liquidate all positions and exit. This is the 'panic button'."
-    )
-
-    args = parser.parse_args()
-    
-    # Handle emergency liquidation first if requested
-    if args.emergency_liquidate:
-        if questionary.confirm(
-            "⚠️ EMERGENCY LIQUIDATION ⚠️\nThis will sell ALL positions immediately at market price.\nAre you absolutely sure?",
-            default=False
-        ).ask():
-            print(f"{Fore.RED}{Style.BRIGHT}EXECUTING EMERGENCY LIQUIDATION{Style.RESET_ALL}")
-            if emergency_liquidate_all_positions():
-                print(f"{Fore.GREEN}Emergency liquidation complete.{Style.RESET_ALL}")
-            else:
-                print(f"{Fore.RED}Failed to complete emergency liquidation.{Style.RESET_ALL}")
-        else:
-            print("Emergency liquidation cancelled.")
-        sys.exit(0)
-
-    # Get tickers from various sources
-    all_tickers = []
-    
-    # Add manually specified tickers
-    if args.tickers:
-        manual_tickers = [ticker.strip() for ticker in args.tickers.split(",")]
-        all_tickers.extend(manual_tickers)
-        print(f"Using manually specified tickers: {', '.join(manual_tickers)}")
-    
-    # Add Alpaca holdings if flag is set
-    if args.include_alpaca_holdings:
-        alpaca_holdings = get_alpaca_holdings()
-        # Only add unique tickers not already in the list
-        for ticker in alpaca_holdings:
-            if ticker not in all_tickers:
-                all_tickers.append(ticker)
-        
-        if alpaca_holdings:
-            print(f"Added {len(alpaca_holdings)} tickers from Alpaca holdings")
-    
-    # Ensure we have at least one ticker to analyze
-    if not all_tickers:
-        print("Error: No tickers specified. Use --tickers or --include-alpaca-holdings to specify tickers.")
-        sys.exit(1)
-    
-    print(f"\nAnalyzing the following tickers: {', '.join(all_tickers)}")
-
-    # Select analysts
-    selected_analysts = None
-    choices = questionary.checkbox(
-        "Select your AI analysts.",
-        choices=[questionary.Choice(display, value=value) for display, value in ANALYST_ORDER],
-        instruction="\n\nInstructions: \n1. Press Space to select/unselect analysts.\n2. Press 'a' to select/unselect all.\n3. Press Enter when done to run the hedge fund.\n",
-        validate=lambda x: len(x) > 0 or "You must select at least one analyst.",
-        style=questionary.Style(
-            [
-                ("checkbox-selected", "fg:green"),
-                ("selected", "fg:green noinherit"),
-                ("highlighted", "noinherit"),
-                ("pointer", "noinherit"),
-            ]
-        ),
-    ).ask()
-
-    if not choices:
-        print("\n\nInterrupt received. Exiting...")
-        sys.exit(0)
-    else:
-        selected_analysts = choices
-        print(f"\nSelected analysts: {', '.join(Fore.GREEN + choice.title().replace('_', ' ') + Style.RESET_ALL for choice in choices)}\n")
-
-    # Select LLM model
-    model_choice = questionary.select(
-        "Select your LLM model:",
-        choices=[questionary.Choice(display, value=value) for display, value, _ in LLM_ORDER],
-        style=questionary.Style([
-            ("selected", "fg:green bold"),
-            ("pointer", "fg:green bold"),
-            ("highlighted", "fg:green"),
-            ("answer", "fg:green bold"),
-        ])
-    ).ask()
-
-    if not model_choice:
-        print("\n\nInterrupt received. Exiting...")
-        sys.exit(0)
-    else:
-        # Get model info using the helper function
-        model_info = get_model_info(model_choice)
-        if model_info:
-            model_provider = model_info.provider.value
-            print(f"\nSelected {Fore.CYAN}{model_provider}{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_choice}{Style.RESET_ALL}\n")
-        else:
-            model_provider = "Unknown"
-            print(f"\nSelected model: {Fore.GREEN + Style.BRIGHT}{model_choice}{Style.RESET_ALL}\n")
-
-    # Create the workflow with selected analysts
-    workflow = create_workflow(selected_analysts)
-    app = workflow.compile()
-
-    if args.show_agent_graph:
-        file_path = ""
-        if selected_analysts is not None:
-            for selected_analyst in selected_analysts:
-                file_path += selected_analyst + "_"
-            file_path += "graph.png"
-        save_graph_as_png(app, file_path)
-
-    # Validate dates if provided
-    if args.start_date:
-        try:
-            datetime.strptime(args.start_date, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError("Start date must be in YYYY-MM-DD format")
-
-    if args.end_date:
-        try:
-            datetime.strptime(args.end_date, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError("End date must be in YYYY-MM-DD format")
-
-    # Set the start and end dates
-    end_date = args.end_date or datetime.now().strftime("%Y-%m-%d")
-    if not args.start_date:
-        # Calculate 3 months before end_date
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        start_date = (end_date_obj - relativedelta(months=3)).strftime("%Y-%m-%d")
-    else:
-        start_date = args.start_date
-
-    # Initialize portfolio
-    if LIVE_TRADING_ENABLED:
-        # Try to get portfolio data from Alpaca in live trading mode
-        alpaca_portfolio = initialize_portfolio_from_alpaca(all_tickers)
-        if alpaca_portfolio:
-            portfolio = alpaca_portfolio
-            print(f"{Fore.GREEN}Using actual portfolio data from Alpaca account{Style.RESET_ALL}")
-            print(f"Cash: ${portfolio['cash']:.2f}, Margin Requirement: ${portfolio['margin_requirement']:.2f}")
-        else:
-            # Fall back to default initialization if Alpaca data retrieval fails
-            print(f"{Fore.YELLOW}Could not retrieve Alpaca portfolio data, using default values{Style.RESET_ALL}")
-            portfolio = {
-                "cash": args.initial_cash,
-                "margin_requirement": args.margin_requirement,
-                "positions": {
-                    ticker: {
-                        "long": 0,
-                        "short": 0,
-                        "long_cost_basis": 0.0,
-                        "short_cost_basis": 0.0,
-                    } for ticker in all_tickers
-                },
-                "realized_gains": {
-                    ticker: {
-                        "long": 0.0,
-                        "short": 0.0,
-                    } for ticker in all_tickers
-                }
-            }
-    else:
-        # Use default values for simulation mode
-        portfolio = {
-            "cash": args.initial_cash,
-            "margin_requirement": args.margin_requirement,
-            "positions": {
-                ticker: {
-                    "long": 0,
-                    "short": 0,
-                    "long_cost_basis": 0.0,
-                    "short_cost_basis": 0.0,
-                } for ticker in all_tickers
-            },
-            "realized_gains": {
-                ticker: {
-                    "long": 0.0,
-                    "short": 0.0,
-                } for ticker in all_tickers
-            }
-        }
-
-    # Run the hedge fund
-    result = run_hedge_fund(
-        tickers=all_tickers,
-        start_date=start_date,
-        end_date=end_date,
-        portfolio=portfolio,
-        show_reasoning=args.show_reasoning,
-        selected_analysts=selected_analysts,
-        model_name=model_choice,
-        model_provider=model_provider,
-    )
-    print_trading_output(result)
+    main()

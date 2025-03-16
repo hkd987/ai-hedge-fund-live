@@ -40,6 +40,10 @@ def paul_tudor_jones_agent(state: AgentState):
     for ticker in tickers:
         progress.update_status("paul_tudor_jones_agent", ticker, "Fetching price data")
         # Get price data for technical analysis
+        # If end_date is None, use today's date
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            
         # Calculate start_date by subtracting 180 days from end_date
         end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
         start_date_obj = end_date_obj - timedelta(days=180)
