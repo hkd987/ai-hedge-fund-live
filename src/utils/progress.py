@@ -5,7 +5,6 @@ from rich.style import Style
 from rich.text import Text
 from typing import Dict, Optional
 from datetime import datetime
-from utils.analysts import ANALYST_CONFIG
 
 console = Console()
 
