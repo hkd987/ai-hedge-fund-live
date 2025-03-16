@@ -459,44 +459,65 @@ def calculate_risk_reward(prices_df: pd.DataFrame) -> dict:
     }
 
 
+def convert_to_serializable(obj):
+    """
+    Convert NumPy types to standard Python types for JSON serialization.
+    """
+    if isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return convert_to_serializable(obj.tolist())
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    else:
+        return obj
+
+
 def generate_tudor_jones_output(
     ticker: str,
     analysis_data: dict,
     model_name: str,
     model_provider: str,
 ) -> PaulTudorJonesSignal:
-    """Generates Paul Tudor Jones' analysis and trading signal using an LLM."""
+    """Generate the final output for the Paul Tudor Jones agent."""
     
     template = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
+                """You are Paul Tudor Jones, a legendary global macro trader known for your ability to identify major market shifts and for your risk management approach.
+                
+                Your key trading principles include:
+                1. Capital preservation is your #1 priority
+                2. Cut losses quickly when wrong
+                3. Ride winners with trailing stops
+                4. Look for 5:1 risk-reward opportunities
+                5. Pay close attention to market psychology and sentiment
+                6. Trade with the trend but look for important pivot points
+                7. Monitor the broader economic environment for major shifts
+                
+                You're particularly known for:
+                - Your ability to identify major market tops and bottoms
+                - Your emphasis on risk management
+                - Your attention to price action and technical analysis
+                - Your integration of macro trends with technical indicators
+                
+                Based on the analysis provided, give your trading signal (bullish, bearish, or neutral) with a confidence level (0-100).
+                
+                Provide a detailed explanation for your reasoning. Be authentic to your style - focused on price action, sentiment, and risk management.
                 """
-                You are Paul Tudor Jones, one of the world's most successful macro traders and technical analysts.
-                
-                Your investment approach:
-                1. You rely heavily on technical analysis and price action
-                2. You're known for identifying macro trends and market inflection points
-                3. You practice strict risk management, never risking more than 1-2% on any trade
-                4. You look for 5:1 reward-to-risk opportunities
-                5. You're a swing trader who focuses on momentum and trend following
-                6. You're also a contrarian at market extremes, buying panic and selling euphoria
-                7. You're known for making bold, high-conviction trades (like shorting the market before 1987 crash)
-                
-                Based on the technical data provided, analyze the stock and decide:
-                - Whether the stock is in a clear trend or consolidation
-                - If the technical indicators suggest a potential entry or exit point
-                - If the risk-reward ratio meets your criteria (5:1 minimum)
-                - If there are any contrarian signals at market extremes
-                - The overall trading opportunity (bullish, bearish, or neutral)
-                
-                Your response must be decisive and include a specific trading signal (bullish, bearish, or neutral) with a confidence level (0-100).
-                """,
             ),
             (
                 "human",
-                """
-                I need your analysis for {ticker} based on the following technical and market data:
+                """Analyze this stock for trading potential:
+                
+                Ticker: {ticker}
                 
                 Technical Analysis:
                 {tech_analysis}
@@ -529,15 +550,18 @@ def generate_tudor_jones_output(
         ]
     )
     
-    # Filter out None values and format
-    tech_analysis = json.dumps(analysis_data.get("technical_analysis", {}), indent=2)
-    momentum_analysis = json.dumps(analysis_data.get("momentum_analysis", {}), indent=2)
-    volatility_analysis = json.dumps(analysis_data.get("volatility_analysis", {}), indent=2)
-    risk_reward = json.dumps(analysis_data.get("risk_reward_ratio", {}), indent=2)
-    current_price = analysis_data.get("current_price", "N/A")
-    market_cap = analysis_data.get("market_cap", "N/A")
+    # Convert data to serializable format
+    serializable_data = convert_to_serializable(analysis_data)
     
-    price_history = analysis_data.get("price_history", {})
+    # Filter out None values and format
+    tech_analysis = json.dumps(serializable_data.get("technical_analysis", {}), indent=2)
+    momentum_analysis = json.dumps(serializable_data.get("momentum_analysis", {}), indent=2)
+    volatility_analysis = json.dumps(serializable_data.get("volatility_analysis", {}), indent=2)
+    risk_reward = json.dumps(serializable_data.get("risk_reward_ratio", {}), indent=2)
+    current_price = serializable_data.get("current_price", "N/A")
+    market_cap = serializable_data.get("market_cap", "N/A")
+    
+    price_history = serializable_data.get("price_history", {})
     price_week_ago = price_history.get("last_week", "N/A")
     price_month_ago = price_history.get("last_month", "N/A") 
     price_quarter_ago = price_history.get("last_quarter", "N/A")

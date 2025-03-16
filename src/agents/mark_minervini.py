@@ -1,7 +1,7 @@
 from graph.state import AgentState, show_agent_reasoning
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import json
 import numpy as np
 import pandas as pd
@@ -12,9 +12,11 @@ from utils.progress import progress
 
 
 class MarkMinerviniSignal(BaseModel):
-    signal: Literal["bullish", "bearish", "neutral"] = Field(..., alias="trading_signal")
+    signal: Literal["bullish", "bearish", "neutral"] = Field(..., validation_alias="trading_signal")
     confidence: float
     reasoning: str
+    
+    model_config = ConfigDict(populate_by_name=True)
 
 
 def mark_minervini_agent(state: AgentState):
@@ -544,6 +546,8 @@ def generate_minervini_output(
                   "confidence": a float value between 0 and 100,
                   "reasoning": "Your detailed reasoning here"
                 }}
+                
+                IMPORTANT: Make sure to use these EXACT field names: "signal", "confidence", and "reasoning".
                 """,
             ),
             (
@@ -574,12 +578,14 @@ def generate_minervini_output(
                 
                 Based on your analysis, provide your trading signal (bullish, bearish, or neutral) with confidence level (0-100) and detailed reasoning explaining why the stock does or doesn't meet your criteria.
                 
-                Remember to format your response as a JSON object with these keys exactly:
+                Remember to format your response as a JSON object with these EXACT keys:
                 {{
                 - "signal": A string that must be one of "bullish", "bearish", or "neutral"
                 - "confidence": A number between 0 and 100
                 - "reasoning": A string with your detailed analysis
                 }}
+                
+                The field names must be exactly as shown above: "signal", "confidence", and "reasoning".
                 """,
             ),
         ]
