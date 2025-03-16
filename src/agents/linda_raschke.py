@@ -260,19 +260,21 @@ def analyze_roc(prices_df: pd.DataFrame) -> dict:
     divergence_bearish = False
     
     if len(prices_df) >= 10:
-        # Look for recent low in price
-        recent_min_idx = prices_df['low'][-10:].idxmin()
-        if recent_min_idx != prices_df.index[-1]:  # If recent low isn't the most recent bar
-            price_made_lower_low = prices_df['low'].iloc[-1] < prices_df['low'].iloc[recent_min_idx]
-            roc_made_higher_low = prices_df['roc_2'].iloc[-1] > prices_df['roc_2'].iloc[recent_min_idx]
+        # Look for recent low in price using argmin instead of idxmin
+        recent_min_idx = prices_df['low'][-10:].argmin()
+        recent_min_iloc = len(prices_df) - 10 + recent_min_idx  # Convert to proper iloc index
+        if recent_min_iloc != len(prices_df) - 1:  # If recent low isn't the most recent bar
+            price_made_lower_low = prices_df['low'].iloc[-1] < prices_df['low'].iloc[recent_min_iloc]
+            roc_made_higher_low = prices_df['roc_2'].iloc[-1] > prices_df['roc_2'].iloc[recent_min_iloc]
             
             divergence_bullish = price_made_lower_low and roc_made_higher_low
         
-        # Look for recent high in price
-        recent_max_idx = prices_df['high'][-10:].idxmax()
-        if recent_max_idx != prices_df.index[-1]:  # If recent high isn't the most recent bar
-            price_made_higher_high = prices_df['high'].iloc[-1] > prices_df['high'].iloc[recent_max_idx]
-            roc_made_lower_high = prices_df['roc_2'].iloc[-1] < prices_df['roc_2'].iloc[recent_max_idx]
+        # Look for recent high in price using argmax instead of idxmax
+        recent_max_idx = prices_df['high'][-10:].argmax()
+        recent_max_iloc = len(prices_df) - 10 + recent_max_idx  # Convert to proper iloc index
+        if recent_max_iloc != len(prices_df) - 1:  # If recent high isn't the most recent bar
+            price_made_higher_high = prices_df['high'].iloc[-1] > prices_df['high'].iloc[recent_max_iloc]
+            roc_made_lower_high = prices_df['roc_2'].iloc[-1] < prices_df['roc_2'].iloc[recent_max_iloc]
             
             divergence_bearish = price_made_higher_high and roc_made_lower_high
     
