@@ -640,6 +640,13 @@ def generate_livermore_output(
                 - "It was never my thinking that made the big money for me. It was always my sitting."
                 
                 As Livermore, provide decisive trading signals based on your analysis of price action, momentum, and volume behavior.
+                
+                IMPORTANT: Your response must be a JSON object with exactly these fields:
+                {
+                    "signal": "bullish" or "bearish" or "neutral", 
+                    "confidence": a float value between 0.0 and 100.0,
+                    "reasoning": "detailed explanation in Livermore's style"
+                }
                 """,
             ),
             (
@@ -666,6 +673,13 @@ def generate_livermore_output(
                 {money_management}
                 
                 Based on your analysis, provide your trading signal with confidence level (0-100) and detailed reasoning in your authentic voice. Explain why this stock is either worth speculating on or should be avoided based on your proven methodology.
+                
+                REMEMBER: Your response must be a valid JSON with exactly these three fields:
+                {
+                    "signal": "bullish" or "bearish" or "neutral",
+                    "confidence": a number between 0 and 100,
+                    "reasoning": "your detailed explanation"
+                }
                 """,
             ),
         ]
