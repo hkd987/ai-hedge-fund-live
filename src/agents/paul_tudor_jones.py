@@ -328,15 +328,32 @@ def analyze_volatility(prices_df: pd.DataFrame) -> dict:
     volatility_increasing = df['20d_volatility'].iloc[-1] > df['20d_volatility'].iloc[-10] if len(df) >= 10 else False
     
     # Bollinger Band width as volatility indicator
-    df['BB_width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle'] if 'BB_Upper' in df and 'BB_Lower' in df and 'BB_Middle' in df else None
-    if 'BB_width' in df:
-        bb_width_expanding = df['BB_width'].iloc[-1] > df['BB_width'].iloc[-5] if len(df) >= 5 else False
-        bb_width_percentile = np.percentile(df['BB_width'].dropna(), [25, 50, 75, 90])
-        current_bb_width = df['BB_width'].iloc[-1]
-        bb_width_rank = sum(current_bb_width > p for p in bb_width_percentile) / 4
+    has_bb_columns = all(col in df.columns for col in ['BB_Upper', 'BB_Lower', 'BB_Middle'])
+    
+    if has_bb_columns:
+        # Calculate BB width only if all necessary columns exist
+        df['BB_width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
+        df['BB_width'] = df['BB_width'].replace([np.inf, -np.inf], np.nan)  # Handle division by zero
+        
+        # Check if we have valid BB width values before comparing
+        if len(df) >= 5 and not df['BB_width'].iloc[-1] is None and not df['BB_width'].iloc[-5] is None:
+            bb_width_expanding = df['BB_width'].iloc[-1] > df['BB_width'].iloc[-5]
+        else:
+            bb_width_expanding = False
+            
+        # Only calculate percentiles if we have valid data
+        if not df['BB_width'].dropna().empty:
+            bb_width_percentile = np.percentile(df['BB_width'].dropna(), [25, 50, 75, 90])
+            current_bb_width = df['BB_width'].iloc[-1]
+            if current_bb_width is not None:
+                bb_width_rank = sum(current_bb_width > p for p in bb_width_percentile) / 4
+            else:
+                bb_width_rank = 0.5  # Neutral value if we can't calculate
+        else:
+            bb_width_rank = 0.5  # Neutral value if no data
     else:
-        bb_width_expanding = None
-        bb_width_rank = None
+        bb_width_expanding = False
+        bb_width_rank = 0.5  # Neutral value
     
     # Calculate max drawdown in the period
     df['rolling_max'] = df['close'].rolling(window=60, min_periods=1).max()
