@@ -572,6 +572,28 @@ def analyze_volume_patterns(prices_df: pd.DataFrame) -> dict:
     }
 
 
+def convert_to_serializable(obj):
+    """
+    Convert NumPy types to standard Python types for JSON serialization.
+    """
+    import numpy as np
+    
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_serializable(item) for item in obj]
+    else:
+        return obj
+
+
 def generate_raschke_output(
     ticker: str,
     analysis_data: dict,
@@ -582,6 +604,9 @@ def generate_raschke_output(
     Generate a trading signal based on Linda Raschke's analysis methods.
     Uses LLM to synthesize and interpret multiple technical signals.
     """
+    # Convert analysis data to serializable format
+    serializable_data = convert_to_serializable(analysis_data)
+    
     # Create the prompt template
     template = ChatPromptTemplate.from_messages(
         [
@@ -650,24 +675,24 @@ def generate_raschke_output(
         signal_counts = {"bullish": 0, "bearish": 0, "neutral": 0}
         
         # Process Holy Grail signal
-        if analysis_data["holy_grail"]["setup_detected"]:
-            signal_counts[analysis_data["holy_grail"]["signal_type"]] += 1
+        if serializable_data["holy_grail"]["setup_detected"]:
+            signal_counts[serializable_data["holy_grail"]["signal_type"]] += 1
             
         # Process 2-period ROC signal
-        if analysis_data["roc_signals"]["setup_detected"]:
-            signal_counts[analysis_data["roc_signals"]["signal_type"]] += 1
+        if serializable_data["roc_signals"]["setup_detected"]:
+            signal_counts[serializable_data["roc_signals"]["signal_type"]] += 1
             
         # Process 80-20 strategy signal
-        if analysis_data["mean_reversion"]["setup_detected"]:
-            signal_counts[analysis_data["mean_reversion"]["signal_type"]] += 1
+        if serializable_data["mean_reversion"]["setup_detected"]:
+            signal_counts[serializable_data["mean_reversion"]["signal_type"]] += 1
             
         # Process 3-10 oscillator signal
-        if analysis_data["oscillator_signals"]["setup_detected"]:
-            signal_counts[analysis_data["oscillator_signals"]["signal_type"]] += 1
+        if serializable_data["oscillator_signals"]["setup_detected"]:
+            signal_counts[serializable_data["oscillator_signals"]["signal_type"]] += 1
             
         # Process volume signals
-        if analysis_data["volume_signals"]["setup_detected"]:
-            signal_counts[analysis_data["volume_signals"]["signal_type"]] += 1
+        if serializable_data["volume_signals"]["setup_detected"]:
+            signal_counts[serializable_data["volume_signals"]["signal_type"]] += 1
             
         # Determine the most common signal type
         if signal_counts["bullish"] > signal_counts["bearish"]:
@@ -690,13 +715,13 @@ def generate_raschke_output(
     prompt = template.invoke(
         {
             "ticker": ticker,
-            "holy_grail": json.dumps(analysis_data["holy_grail"], indent=2),
-            "roc_signals": json.dumps(analysis_data["roc_signals"], indent=2),
-            "mean_reversion": json.dumps(analysis_data["mean_reversion"], indent=2),
-            "oscillator_signals": json.dumps(analysis_data["oscillator_signals"], indent=2),
-            "volume_signals": json.dumps(analysis_data["volume_signals"], indent=2),
-            "current_price": analysis_data["current_price"],
-            "recent_volatility": analysis_data["recent_volatility"],
+            "holy_grail": json.dumps(serializable_data["holy_grail"], indent=2),
+            "roc_signals": json.dumps(serializable_data["roc_signals"], indent=2),
+            "mean_reversion": json.dumps(serializable_data["mean_reversion"], indent=2),
+            "oscillator_signals": json.dumps(serializable_data["oscillator_signals"], indent=2),
+            "volume_signals": json.dumps(serializable_data["volume_signals"], indent=2),
+            "current_price": serializable_data["current_price"],
+            "recent_volatility": serializable_data["recent_volatility"],
         }
     )
     
