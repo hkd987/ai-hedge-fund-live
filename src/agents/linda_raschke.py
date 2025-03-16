@@ -659,11 +659,11 @@ def generate_raschke_output(
                 
                 Based on Linda Raschke's trading methodology, what's your trading signal for ${ticker}?
                 Return your answer as a JSON with these fields:
-                {
+                {{
                   "signal": "bullish" or "bearish" or "neutral",
                   "confidence": a float value between 0 and 100,
                   "reasoning": "Your detailed reasoning using Raschke's principles"
-                }
+                }}
                 """,
             ),
         ]
