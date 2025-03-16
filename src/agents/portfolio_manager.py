@@ -106,6 +106,48 @@ def get_alpaca_client():
         return None
 
 
+def get_alpaca_open_orders(client, ticker=None):
+    """
+    Get all open orders from Alpaca, optionally filtered by ticker.
+    
+    Args:
+        client: Initialized Alpaca client
+        ticker: Optional ticker symbol to filter by
+        
+    Returns:
+        dict: Dictionary of ticker to list of open orders
+    """
+    if not client:
+        logger.warning("No Alpaca client available. Cannot get open orders.")
+        return {}
+    
+    try:
+        # Get all open orders
+        if ticker:
+            orders = client.get_orders(status="open", symbols=ticker)
+        else:
+            orders = client.get_orders(status="open")
+        
+        # Organize by ticker
+        orders_by_ticker = {}
+        for order in orders:
+            symbol = order.symbol
+            if symbol not in orders_by_ticker:
+                orders_by_ticker[symbol] = []
+            orders_by_ticker[symbol].append(order)
+        
+        # Log order information
+        for ticker, ticker_orders in orders_by_ticker.items():
+            logger.info(f"Found {len(ticker_orders)} open orders for {ticker}")
+            for order in ticker_orders:
+                logger.info(f"  Order {order.id}: {order.side} {order.qty} shares at ${order.limit_price if hasattr(order, 'limit_price') and order.limit_price else 'market'}")
+        
+        return orders_by_ticker
+    except Exception as e:
+        logger.error(f"Failed to get open orders: {e}")
+        return {}
+
+
 def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None):
     """Execute a trade with Alpaca, applying risk management rules"""
     # Check if the trade is allowed by our risk management system
@@ -127,6 +169,26 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
     if not client:
         logger.error("Alpaca client not available")
         return False
+    
+    # Check for existing open orders for this ticker
+    open_orders = get_alpaca_open_orders(client, ticker)
+    if ticker in open_orders and open_orders[ticker]:
+        existing_orders = open_orders[ticker]
+        
+        # Check if there's already an order with the same action
+        for order in existing_orders:
+            order_side = order.side
+            is_same_action = False
+            
+            # Map Alpaca order side to our action
+            if order_side == "buy" and action in ["buy", "cover"]:
+                is_same_action = True
+            elif order_side == "sell" and action in ["sell", "short"]:
+                is_same_action = True
+                
+            if is_same_action:
+                logger.warning(f"There is already an open {order_side} order for {ticker}. Skipping duplicate order.")
+                return False
     
     # Map our action to Alpaca's OrderSide and determine if it's a short order
     side_mapping = {
@@ -318,6 +380,7 @@ def get_alpaca_portfolio_state(client, tickers):
             "cash": float(account.cash),
             "positions": {},
             "margin_requirement": 0.0,  # We'll calculate this based on positions
+            "open_orders": {},  # We'll store open orders here
         }
         
         # Get all positions
@@ -328,6 +391,14 @@ def get_alpaca_portfolio_state(client, tickers):
                 all_positions[position.symbol] = position
         except Exception as e:
             logger.warning(f"Failed to get positions from Alpaca: {e}")
+        
+        # Get all open orders
+        try:
+            open_orders_by_ticker = get_alpaca_open_orders(client)
+            portfolio["open_orders"] = open_orders_by_ticker
+            logger.info(f"Found open orders for {len(open_orders_by_ticker)} tickers")
+        except Exception as e:
+            logger.warning(f"Failed to get open orders from Alpaca: {e}")
         
         # Organize positions by ticker
         for ticker in tickers:
@@ -484,11 +555,17 @@ def portfolio_management_agent(state: AgentState):
     price_data = state["data"].get("price_data", {})
 
     # If live trading is enabled, try to get current portfolio state from Alpaca
+    alpaca_client = None
+    open_orders_by_ticker = {}
     if LIVE_TRADING_ENABLED:
         progress.update_status("portfolio_management_agent", None, "Getting current portfolio state from Alpaca")
         
         alpaca_client = get_alpaca_client()
         if alpaca_client:
+            # Get open orders
+            open_orders_by_ticker = get_alpaca_open_orders(alpaca_client)
+            
+            # Get portfolio state
             alpaca_portfolio = get_alpaca_portfolio_state(alpaca_client, tickers)
             if alpaca_portfolio:
                 logger.info("Using portfolio state from Alpaca")
@@ -509,77 +586,50 @@ def portfolio_management_agent(state: AgentState):
     # Generate comprehensive risk dashboard if we have price data
     risk_dashboard = None
     market_data = price_data.get('SPY', None)
-    if market_data is not None:
-        try:
-            progress.update_status("portfolio_management_agent", None, "Generating risk dashboard")
-            risk_dashboard = generate_risk_dashboard(portfolio, tickers, price_data)
-            logger.info("Successfully generated comprehensive risk dashboard")
-        except Exception as e:
-            logger.warning(f"Failed to generate risk dashboard: {e}")
-
-    # Get position limits, current prices, and signals for every ticker
-    position_limits = {}
-    current_prices = {}
-    max_shares = {}
-    signals_by_ticker = {}
     prices_by_ticker = {}
     
+    # Extract price dataframes for each ticker
     for ticker in tickers:
-        progress.update_status("portfolio_management_agent", ticker, "Processing analyst signals")
-
-        # Get position limits and current prices for the ticker
-        risk_data = analyst_signals.get("risk_management_agent", {}).get(ticker, {})
-        position_limits[ticker] = risk_data.get("remaining_position_limit", 0)
-        current_prices[ticker] = risk_data.get("current_price", 0)
+        if ticker in price_data:
+            prices_by_ticker[ticker] = price_data[ticker]
+    
+    # If we have market data, generate a risk dashboard
+    if len(prices_by_ticker) > 0 and market_data is not None:
+        try:
+            risk_dashboard = generate_risk_dashboard(portfolio, tickers, prices_by_ticker)
+            logger.info("Generated comprehensive risk dashboard")
+        except Exception as e:
+            logger.error(f"Failed to generate risk dashboard: {e}")
+    
+    # Get current prices for each ticker from the most recent price data
+    current_prices = {}
+    for ticker in tickers:
+        if ticker in price_data:
+            # Get the last closing price from the price data
+            current_prices[ticker] = price_data[ticker]['close'].iloc[-1]
+    
+    # Get maximum shares per ticker from the risk management agent
+    max_shares = {}
+    if "risk_management_agent" in analyst_signals:
+        risk_signals = analyst_signals["risk_management_agent"]
         
-        # Store price data for use in trade execution
-        prices_by_ticker[ticker] = price_data.get(ticker)
-        
-        # Get max shares directly from risk manager if available, otherwise calculate it
-        if "max_shares" in risk_data:
-            max_shares[ticker] = risk_data.get("max_shares", 0)
-        else:
-            # Calculate maximum shares allowed based on position limit and price
-            if current_prices[ticker] > 0:
-                max_shares[ticker] = int(position_limits[ticker] / current_prices[ticker])
-            else:
-                max_shares[ticker] = 0
-                
-        # Check if circuit breaker is active
-        if risk_data.get("circuit_breaker_active", False):
-            # No trades allowed when circuit breaker is active
-            max_shares[ticker] = 0
+        # Extract max shares for each ticker
+        for ticker in tickers:
+            if ticker in risk_signals:
+                ticker_risk = risk_signals[ticker]
+                max_shares[ticker] = ticker_risk.get("max_shares", 0)
+    
+    # Create default max shares if needed
+    for ticker in tickers:
+        if ticker not in max_shares:
+            # Default to 100 shares as a fallback
+            max_shares[ticker] = 100
 
-        # Get signals for the ticker
-        ticker_signals = {}
-        for agent, signals in analyst_signals.items():
-            if agent != "risk_management_agent" and ticker in signals:
-                # Handle both dictionary-style and object-style signals (Pydantic models)
-                signal_obj = signals[ticker]
-                if hasattr(signal_obj, 'model_dump'):  # It's a Pydantic model
-                    signal_dict = signal_obj.model_dump()
-                    ticker_signals[agent] = {
-                        "signal": signal_dict.get("signal", "neutral"),
-                        "confidence": signal_dict.get("confidence", 0.0)
-                    }
-                elif isinstance(signal_obj, dict):  # It's already a dictionary
-                    ticker_signals[agent] = {
-                        "signal": signal_obj.get("signal", "neutral"),
-                        "confidence": signal_obj.get("confidence", 0.0)
-                    }
-                else:  # It's a Pydantic model but doesn't have model_dump (older version)
-                    ticker_signals[agent] = {
-                        "signal": getattr(signal_obj, "signal", "neutral"),
-                        "confidence": getattr(signal_obj, "confidence", 0.0)
-                    }
-        signals_by_ticker[ticker] = ticker_signals
-
-    progress.update_status("portfolio_management_agent", None, "Making trading decisions")
-
-    # Generate the trading decision
-    result = generate_trading_decision(
+    # Generate trading decisions using LLM
+    progress.update_status("portfolio_management_agent", None, "Generating trading decisions")
+    trading_output = generate_trading_decision(
         tickers=tickers,
-        signals_by_ticker=signals_by_ticker,
+        signals_by_ticker=analyst_signals,
         current_prices=current_prices,
         max_shares=max_shares,
         portfolio=portfolio,
@@ -587,132 +637,127 @@ def portfolio_management_agent(state: AgentState):
         model_name=state["metadata"]["model_name"],
         model_provider=state["metadata"]["model_provider"],
     )
-
-    # Create the portfolio management message
+    
+    # Format the message for the output
+    reasoning = {}
+    decisions = {}
+    
+    # Extract the decisions from the trading output
+    for ticker, decision in trading_output.decisions.items():
+        if ticker in tickers:
+            # Only include tickers that were requested
+            decisions[ticker] = decision
+            reasoning[ticker] = decision.reasoning
+    
+    message_text = json.dumps({"decisions": decisions}, default=lambda x: x.model_dump())
     message = HumanMessage(
-        content=json.dumps({ticker: decision.model_dump() for ticker, decision in result.decisions.items()}),
-        name="portfolio_management",
+        content=message_text,
+        name="portfolio_management_agent",
     )
-
-    # Print the decision if the flag is set
+    
     if state["metadata"]["show_reasoning"]:
-        show_agent_reasoning({ticker: decision.model_dump() for ticker, decision in result.decisions.items()}, "Portfolio Management Agent")
-
-    # Execute trades with Alpaca if live trading is enabled
+        show_agent_reasoning(reasoning, "Portfolio Management Agent")
+    
+    # Execute trades if live trading is enabled
     if LIVE_TRADING_ENABLED:
-        progress.update_status("portfolio_management_agent", None, "Executing live trades on Alpaca")
-        
-        # Check if we've hit a circuit breaker
-        from utils.risk_manager import TODAY_STATE
-        if TODAY_STATE.get("circuit_breaker_triggered", False):
-            progress.update_status("portfolio_management_agent", None, "CIRCUIT BREAKER ACTIVE: Trading suspended")
-            logger.warning("CIRCUIT BREAKER ACTIVE: All trading is suspended for today.")
-        else:
-            # Execute trades if not in circuit breaker mode
-            for ticker, decision in result.decisions.items():
-                if decision.action != "hold" and decision.quantity > 0:
-                    # Validate the decision against current portfolio positions to prevent double selling/shorting
-                    current_position = portfolio.get("positions", {}).get(ticker, {})
-                    current_long = current_position.get("long", 0)
-                    current_short = current_position.get("short", 0)
+        progress.update_status("portfolio_management_agent", None, "Executing trades")
+        for ticker, decision in decisions.items():
+            if decision.action != "hold" and decision.quantity > 0:
+                # Check if there are already open orders for this ticker
+                ticker_has_open_orders = ticker in open_orders_by_ticker and open_orders_by_ticker[ticker]
+                if ticker_has_open_orders:
+                    open_order_sides = [order.side for order in open_orders_by_ticker[ticker]]
+                    logger.warning(f"Skipping {decision.action} for {ticker} - there are already open orders: {open_order_sides}")
+                    continue
+                
+                # Get the current position for this ticker
+                position_data = portfolio.get("positions", {}).get(ticker, {})
+                has_long = position_data.get("long", 0) > 0
+                has_short = position_data.get("short", 0) > 0
+                
+                # Validate the decision based on current positions
+                if decision.action == "sell" and not has_long:
+                    logger.warning(f"Cannot sell {ticker}: No long position exists")
+                    continue
+                elif decision.action == "cover" and not has_short:
+                    logger.warning(f"Cannot cover {ticker}: No short position exists")
+                    continue
                     
-                    # Validate the decision
-                    invalid_decision = False
+                # Apply additional risk adjustments
+                original_quantity = decision.quantity
+                adjusted_quantity = decision.quantity
+                adjustment_reasons = []
+                
+                # Check for market regime-based adjustments
+                if risk_dashboard and "market_regime" in risk_dashboard:
+                    if risk_dashboard["market_regime"] == "bear":
+                        adjusted_quantity = int(adjusted_quantity * 0.5)  # Reduce by 50% in bear markets
+                        adjustment_reasons.append("bear market detected")
+                    elif risk_dashboard["market_regime"] == "high_volatility":
+                        adjusted_quantity = int(adjusted_quantity * 0.7)  # Reduce by 30% in high volatility
+                        adjustment_reasons.append("high market volatility")
+                
+                # Check for pre-earnings announcements
+                ticker_risk = risk_signals.get(ticker, {})
+                if "position_risk_params" in ticker_risk and ticker_risk["position_risk_params"]:
+                    risk_params = ticker_risk["position_risk_params"]
+                    if risk_params.get("upcoming_earnings", False):
+                        adjusted_quantity = int(adjusted_quantity * 0.5)  # Reduce by 50% before earnings
+                        adjustment_reasons.append("upcoming earnings announcement")
+                
+                # Update the decision quantity
+                decision.quantity = adjusted_quantity
+                
+                # Log any adjustments
+                if original_quantity != adjusted_quantity:
+                    logger.warning(f"{ticker}: {', '.join(adjustment_reasons)}. Reducing order from {original_quantity} to {adjusted_quantity} shares")
+                
+                # Check for existing open orders if using Alpaca
+                if LIVE_TRADING_ENABLED and ticker in open_orders_by_ticker and open_orders_by_ticker[ticker]:
+                    existing_orders = open_orders_by_ticker[ticker]
+                    logger.info(f"{ticker} already has {len(existing_orders)} open orders. Checking compatibility...")
                     
-                    # Check for invalid sell (trying to sell more than owned)
-                    if decision.action == "sell" and decision.quantity > current_long:
-                        logger.warning(f"Invalid decision for {ticker}: Cannot sell {decision.quantity} shares when only {current_long} owned")
-                        decision.quantity = current_long
-                        if decision.quantity == 0:
-                            decision.action = "hold"
-                            invalid_decision = True
+                    # Check if any orders conflict with the current decision
+                    conflicting_order = False
+                    for order in existing_orders:
+                        order_side = order.side
+                        
+                        # Check if existing order conflicts with our action
+                        if (decision.action in ["buy", "cover"] and order_side == "buy") or \
+                           (decision.action in ["sell", "short"] and order_side == "sell"):
+                            logger.warning(f"There is already an open {order_side} order for {ticker}. Canceling new {decision.action} order.")
+                            decision.quantity = 0  # Zero out quantity to skip this order
+                            conflicting_order = True
+                            break
                     
-                    # Check for invalid cover (trying to cover more than shorted)
-                    elif decision.action == "cover" and decision.quantity > current_short:
-                        logger.warning(f"Invalid decision for {ticker}: Cannot cover {decision.quantity} shares when only {current_short} shorted")
-                        decision.quantity = current_short
-                        if decision.quantity == 0:
-                            decision.action = "hold"
-                            invalid_decision = True
-                    
-                    # Check for attempting to sell when nothing is owned
-                    elif decision.action == "sell" and current_long <= 0:
-                        logger.warning(f"Invalid decision for {ticker}: Cannot sell when no shares are owned")
-                        decision.action = "hold"
-                        invalid_decision = True
-                    
-                    # Check for attempting to cover when nothing is shorted
-                    elif decision.action == "cover" and current_short <= 0:
-                        logger.warning(f"Invalid decision for {ticker}: Cannot cover when no shares are shorted")
-                        decision.action = "hold"
-                        invalid_decision = True
-                    
-                    if invalid_decision:
-                        progress.update_status("portfolio_management_agent", ticker, f"Invalid decision corrected to {decision.action}")
+                    if conflicting_order:
+                        decision.reasoning += f"\nOrder canceled due to existing open {order_side} orders for {ticker}."
                         continue
-                    
-                    # First perform time-based risk check for earnings and market hours
-                    risk_adjustment_needed = False
-                    risk_reasons = []
-                    
-                    # Check market hours for high risk periods
-                    market_hours = check_market_hours()
-                    if market_hours["high_risk_period"]:
-                        risk_adjustment_needed = True
-                        risk_reasons.append(f"Market timing risk: {market_hours['reason']}")
-                    
-                    # Check for upcoming earnings announcements 
-                    try:
-                        next_earnings = get_next_earnings_date(ticker)
-                        if next_earnings and next_earnings.get("days_until_earnings", 100) <= 5:
-                            risk_adjustment_needed = True
-                            risk_reasons.append(f"Earnings announcement in {next_earnings['days_until_earnings']} days")
-                    except Exception as e:
-                        logger.warning(f"Error checking earnings for {ticker}: {e}")
-                    
-                    # Apply time-based risk adjustments if needed
-                    original_quantity = decision.quantity
-                    if risk_adjustment_needed:
-                        # Reduce position size by 40% for high risk periods
-                        adjusted_quantity = max(1, int(decision.quantity * 0.6))
-                        decision.quantity = adjusted_quantity
-                        logger.warning(f"{ticker}: Time-based risk factors: {', '.join(risk_reasons)}. Reducing order from {original_quantity} to {adjusted_quantity} shares")
-                    
-                    # Apply sector and correlation adjustments
-                    progress.update_status("portfolio_management_agent", ticker, "Checking sector and correlation risk")
-                    adjusted_quantity, adjustment_reasons = apply_sector_correlation_adjustments(
-                        ticker, decision.action, decision.quantity, portfolio
+                
+                # Execute the trade if quantity is still positive after all risk adjustments
+                if decision.quantity > 0:
+                    progress.update_status(
+                        "portfolio_management_agent", 
+                        ticker, 
+                        f"Executing {decision.action} order for {decision.quantity} shares"
                     )
                     
-                    if adjusted_quantity != decision.quantity:
-                        original_quantity = decision.quantity
-                        decision.quantity = adjusted_quantity
-                        logger.warning(f"{ticker}: {', '.join(adjustment_reasons)}. Reducing order from {original_quantity} to {adjusted_quantity} shares")
+                    # Pass price data to execute_alpaca_trade for dynamic risk calculations
+                    ticker_prices = prices_by_ticker.get(ticker)
+                    success = execute_alpaca_trade(
+                        ticker, 
+                        decision.action, 
+                        decision.quantity, 
+                        current_prices[ticker],
+                        prices_df=ticker_prices
+                    )
                     
-                    # Execute the trade if quantity is still positive after all risk adjustments
-                    if decision.quantity > 0:
-                        progress.update_status(
-                            "portfolio_management_agent", 
-                            ticker, 
-                            f"Executing {decision.action} order for {decision.quantity} shares"
-                        )
-                        
-                        # Pass price data to execute_alpaca_trade for dynamic risk calculations
-                        ticker_prices = prices_by_ticker.get(ticker)
-                        success = execute_alpaca_trade(
-                            ticker, 
-                            decision.action, 
-                            decision.quantity, 
-                            current_prices[ticker],
-                            prices_df=ticker_prices
-                        )
-                        
-                        if success:
-                            logger.info(f"Successfully executed {decision.action} order for {decision.quantity} shares of {ticker}")
-                        else:
-                            logger.warning(f"Failed to execute {decision.action} order for {decision.quantity} shares of {ticker}")
+                    if success:
+                        logger.info(f"Successfully executed {decision.action} order for {decision.quantity} shares of {ticker}")
                     else:
-                        logger.warning(f"Order for {ticker} canceled due to risk management: Quantity reduced to 0 after all risk adjustments")
+                        logger.warning(f"Failed to execute {decision.action} order for {decision.quantity} shares of {ticker}")
+                else:
+                    logger.warning(f"Order for {ticker} canceled due to risk management: Quantity reduced to 0 after all risk adjustments")
     else:
         progress.update_status("portfolio_management_agent", None, "Live trading disabled (simulation only)")
 
@@ -734,7 +779,25 @@ def generate_trading_decision(
     model_name: str,
     model_provider: str,
 ) -> PortfolioManagerOutput:
-    """Attempts to get a decision from the LLM with retry logic"""
+    """
+    Generate trading decisions for multiple tickers based on analyst signals.
+    
+    Args:
+        tickers: List of ticker symbols.
+        signals_by_ticker: Dictionary of ticker to analyst signals.
+        current_prices: Dictionary of ticker to current price.
+        max_shares: Dictionary of ticker to maximum shares allowed by risk manager.
+        portfolio: Portfolio data including positions and cash.
+        risk_dashboard: Risk dashboard data from risk manager.
+        model_name: Name of the LLM model to use.
+        model_provider: Provider of the LLM model to use.
+        
+    Returns:
+        PortfolioManagerOutput: Trading decisions for each ticker.
+    """
+    # Get open orders from portfolio if available
+    open_orders = portfolio.get("open_orders", {})
+    
     # Create the prompt template
     template = ChatPromptTemplate.from_messages(
         [
@@ -784,14 +847,12 @@ def generate_trading_decision(
               - "cover": Close or reduce short position
               - "hold": No action
 
-              Inputs:
-              - signals_by_ticker: dictionary of ticker → signals
-              - max_shares: maximum shares allowed per ticker
-              - portfolio_cash: current cash in portfolio
-              - portfolio_positions: current positions (both long and short)
-              - current_prices: current prices for each ticker
-              - margin_requirement: current margin requirement for short positions
-              - risk_dashboard: comprehensive risk dashboard for the portfolio
+              Important Notes on Open Orders:
+              - Some tickers may already have open orders that have not yet executed
+              - Do NOT place new orders for tickers that already have open orders of the same type
+              - If a ticker has an open BUY order, do not place another BUY order
+              - If a ticker has an open SELL order, do not place another SELL order
+              - For tickers with open orders, use "hold" action with confidence 50.0 and explain
               """,
             ),
             (
@@ -811,6 +872,9 @@ def generate_trading_decision(
               Current Positions: {portfolio_positions}
               Current Margin Requirement: {margin_requirement}
               Risk Dashboard: {risk_dashboard}
+              
+              Open Orders Information:
+              {open_orders_info}
 
               Output strictly in JSON with the following structure:
               {{
@@ -831,7 +895,21 @@ def generate_trading_decision(
             ),
         ]
     )
-
+    
+    # Format open orders information for the prompt
+    open_orders_info = {}
+    for ticker, orders in open_orders.items():
+        if ticker in tickers:
+            order_details = []
+            for order in orders:
+                order_details.append({
+                    "side": order.side,
+                    "qty": order.qty,
+                    "type": order.type,
+                    "status": order.status
+                })
+            open_orders_info[ticker] = order_details
+    
     # Generate the prompt
     prompt = template.invoke(
         {
@@ -842,11 +920,49 @@ def generate_trading_decision(
             "portfolio_positions": json.dumps(portfolio.get('positions', {}), indent=2),
             "margin_requirement": f"{portfolio.get('margin_requirement', 0):.2f}",
             "risk_dashboard": json.dumps(risk_dashboard, indent=2) if risk_dashboard else "{}",
+            "open_orders_info": json.dumps(open_orders_info, indent=2)
         }
     )
-
+    
     # Create default factory for PortfolioManagerOutput
     def create_default_portfolio_output():
-        return PortfolioManagerOutput(decisions={ticker: PortfolioDecision(action="hold", quantity=0, confidence=0.0, reasoning="Error in portfolio management, defaulting to hold") for ticker in tickers})
-
-    return call_llm(prompt=prompt, model_name=model_name, model_provider=model_provider, pydantic_model=PortfolioManagerOutput, agent_name="portfolio_management_agent", default_factory=create_default_portfolio_output)
+        # Create default hold decisions, respecting open orders
+        decisions = {}
+        for ticker in tickers:
+            reasoning = "Error in portfolio management, defaulting to hold"
+            if ticker in open_orders and open_orders[ticker]:
+                reasoning = f"There are already open orders for {ticker}. Waiting for them to execute."
+            
+            decisions[ticker] = PortfolioDecision(
+                action="hold", 
+                quantity=0, 
+                confidence=0.0, 
+                reasoning=reasoning
+            )
+        return PortfolioManagerOutput(decisions=decisions)
+    
+    # Call the LLM to generate trading decisions
+    result = call_llm(
+        prompt=prompt, 
+        model_name=model_name, 
+        model_provider=model_provider, 
+        pydantic_model=PortfolioManagerOutput, 
+        agent_name="portfolio_management_agent", 
+        default_factory=create_default_portfolio_output
+    )
+    
+    # Post-process the decisions to enforce open order constraints
+    if hasattr(result, 'decisions'):
+        for ticker, decision in result.decisions.items():
+            # If there are open orders for this ticker, override with hold
+            if ticker in open_orders and open_orders[ticker]:
+                open_order_sides = [order.side for order in open_orders[ticker]]
+                decision.action = "hold"
+                decision.quantity = 0
+                decision.confidence = 50.0
+                decision.reasoning = f"There are already open {', '.join(open_order_sides)} orders for {ticker}. Waiting for them to execute."
+                
+                # Log the override
+                logger.info(f"Overriding decision for {ticker} due to existing open orders: {open_order_sides}")
+    
+    return result
