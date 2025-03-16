@@ -539,11 +539,11 @@ def generate_minervini_output(
                 You're looking for the next potential 100-300% winners, not value plays or turnarounds.
                 
                 Return your analysis in the following JSON format:
-                {
+                {{
                   "signal": "bullish" or "bearish" or "neutral",
                   "confidence": a float value between 0 and 100,
                   "reasoning": "Your detailed reasoning here"
-                }
+                }}
                 """,
             ),
             (
@@ -575,9 +575,11 @@ def generate_minervini_output(
                 Based on your analysis, provide your trading signal (bullish, bearish, or neutral) with confidence level (0-100) and detailed reasoning explaining why the stock does or doesn't meet your criteria.
                 
                 Remember to format your response as a JSON object with these keys exactly:
+                {{
                 - "signal": A string that must be one of "bullish", "bearish", or "neutral"
                 - "confidence": A number between 0 and 100
                 - "reasoning": A string with your detailed analysis
+                }}
                 """,
             ),
         ]
