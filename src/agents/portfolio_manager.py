@@ -68,7 +68,15 @@ def get_alpaca_client():
         return None
     
     try:
-        return TradingClient(api_key, api_secret, paper=True)
+        # Use paper trading unless LIVE_TRADING is explicitly set to true
+        is_paper = not LIVE_TRADING_ENABLED
+        client = TradingClient(api_key, api_secret, paper=is_paper)
+        
+        # Log which environment we're using
+        env_type = "paper trading" if is_paper else "live trading"
+        logger.info(f"Initialized Alpaca client for {env_type}")
+        
+        return client
     except Exception as e:
         logger.error(f"Failed to initialize Alpaca client: {e}")
         return None

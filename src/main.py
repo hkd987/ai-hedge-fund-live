@@ -51,6 +51,17 @@ logger = logging.getLogger('main')
 # Check for live trading environment variable
 LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
+# Display a prominent warning if live trading is enabled
+if LIVE_TRADING_ENABLED:
+    warning_message = (
+        f"\n{'!'*80}\n"
+        f"{'!'*20} WARNING: LIVE TRADING IS ENABLED {'!'*20}\n"
+        f"{'!'*20} REAL MONEY WILL BE USED FOR TRADES {'!'*20}\n"
+        f"{'!'*80}\n"
+    )
+    logger.warning(warning_message)
+    print(f"{Fore.RED}{Style.BRIGHT}{warning_message}{Style.RESET_ALL}")
+
 
 def parse_hedge_fund_response(response):
     """Parses a JSON string and returns a dictionary."""
@@ -81,7 +92,15 @@ def get_alpaca_client():
         return None
     
     try:
-        return TradingClient(api_key, api_secret, paper=True)
+        # Use paper trading unless LIVE_TRADING is explicitly set to true
+        is_paper = not LIVE_TRADING_ENABLED
+        client = TradingClient(api_key, api_secret, paper=is_paper)
+        
+        # Log which environment we're using
+        env_type = "paper trading" if is_paper else "live trading"
+        logger.info(f"Initialized Alpaca client for {env_type}")
+        
+        return client
     except Exception as e:
         logger.error(f"Failed to initialize Alpaca client: {e}")
         return None
@@ -101,8 +120,9 @@ def get_alpaca_holdings():
         return []
     
     try:
-        # Initialize Alpaca client
-        client = TradingClient(api_key, api_secret, paper=True)
+        # Initialize Alpaca client with the appropriate environment
+        is_paper = not LIVE_TRADING_ENABLED
+        client = TradingClient(api_key, api_secret, paper=is_paper)
         
         # Get all positions
         positions = client.get_all_positions()
@@ -110,10 +130,12 @@ def get_alpaca_holdings():
         # Extract tickers from positions
         holdings = [position.symbol for position in positions]
         
+        # Log which environment we're using
+        env_type = "paper trading" if is_paper else "live trading"
         if holdings:
-            logger.info(f"Found {len(holdings)} holdings in Alpaca account: {', '.join(holdings)}")
+            logger.info(f"Found {len(holdings)} holdings in Alpaca account ({env_type}): {', '.join(holdings)}")
         else:
-            logger.info("No holdings found in Alpaca account")
+            logger.info(f"No holdings found in Alpaca account ({env_type})")
             
         return holdings
         
@@ -137,14 +159,19 @@ def emergency_liquidate_all_positions():
         return False
     
     try:
+        # Get account info to determine environment
+        account = client.get_account()
+        is_paper = bool(getattr(account, 'is_paper', True))  # Default to True if attribute doesn't exist
+        env_type = "paper trading" if is_paper else "LIVE TRADING"
+        
         # Get all positions
         positions = client.get_all_positions()
         
         if not positions:
-            logger.info("No positions to liquidate.")
+            logger.info(f"No positions to liquidate in {env_type} account.")
             return True
         
-        logger.warning(f"EMERGENCY LIQUIDATION: Attempting to liquidate {len(positions)} positions")
+        logger.warning(f"EMERGENCY LIQUIDATION: Attempting to liquidate {len(positions)} positions in {env_type} account")
         
         # Liquidate each position
         for position in positions:
@@ -172,9 +199,9 @@ def emergency_liquidate_all_positions():
             
             # Submit the order
             order = client.submit_order(order_data)
-            logger.warning(f"EMERGENCY: Submitted {action} order for {qty} shares of {ticker}: Order ID {order.id}")
+            logger.warning(f"EMERGENCY: Submitted {action} order for {qty} shares of {ticker} in {env_type} account: Order ID {order.id}")
         
-        logger.warning("EMERGENCY LIQUIDATION COMPLETE: All positions have been liquidated")
+        logger.warning(f"EMERGENCY LIQUIDATION COMPLETE: All positions have been liquidated in {env_type} account")
         return True
         
     except Exception as e:
