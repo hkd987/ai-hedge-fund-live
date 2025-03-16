@@ -19,6 +19,21 @@ from utils.risk_manager import (
     RISK_PARAMS
 )
 
+# Import enhanced risk management functions
+from utils.enhanced_risk import (
+    calculate_position_risk_parameters,
+    check_market_hours,
+    adjust_risk_for_timing,
+    generate_risk_dashboard,
+    track_sector_exposure,
+    check_sector_limits,
+    check_correlation_risk,
+    detect_market_regime,
+    assess_portfolio_liquidity,
+    calculate_portfolio_beta,
+    get_next_earnings_date
+)
+
 # Import alpaca-py for live trading
 try:
     from alpaca.trading.client import TradingClient
@@ -42,6 +57,12 @@ logger = logging.getLogger('portfolio_manager')
 # Check for live trading environment variable
 LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
+# Load risk parameters from environment
+RISK_PARAMS = {
+    "STOP_LOSS_PCT": float(os.getenv("STOP_LOSS_PCT", "0.05")),
+    "TAKE_PROFIT_PCT": float(os.getenv("TAKE_PROFIT_PCT", "0.20")),
+    "TRAILING_STOP_PCT": float(os.getenv("TRAILING_STOP_PCT", "0.03")),
+}
 
 class PortfolioDecision(BaseModel):
     action: Literal["buy", "sell", "short", "cover", "hold"]
@@ -68,8 +89,11 @@ def get_alpaca_client():
         return None
     
     try:
+        # Check if live trading is enabled in the environment
+        live_trading = os.getenv("LIVE_TRADING", "false").lower() == "true"
+        
         # Use paper trading unless LIVE_TRADING is explicitly set to true
-        is_paper = not LIVE_TRADING_ENABLED
+        is_paper = not live_trading
         client = TradingClient(api_key, api_secret, paper=is_paper)
         
         # Log which environment we're using
@@ -82,17 +106,23 @@ def get_alpaca_client():
         return None
 
 
-def execute_alpaca_trade(ticker, action, quantity, current_price):
-    """Execute a trade using Alpaca API with risk management controls"""
-    if quantity <= 0:
-        logger.info(f"Skipping {action} order for {ticker}: quantity must be > 0")
-        return False
-    
-    # Apply risk management checks
+def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None):
+    """Execute a trade with Alpaca, applying risk management rules"""
+    # Check if the trade is allowed by our risk management system
     if not can_execute_trade(ticker, action, quantity, current_price):
-        logger.warning(f"Risk management rejected {action} order for {ticker}")
+        logger.warning(f"Trade rejected by risk management: {action} {quantity} shares of {ticker}")
         return False
     
+    # First, check market hours to see if this is an appropriate time to trade
+    if prices_df is not None:
+        market_hours_check = check_market_hours()
+        if market_hours_check["high_risk_period"]:
+            logger.warning(f"High risk trading period detected: {market_hours_check['reason']}")
+            # Reduce order size by 50% during high risk periods
+            quantity = max(1, int(quantity * 0.5))
+            logger.info(f"Reduced order size to {quantity} shares due to market timing risk")
+    
+    # Get Alpaca client
     client = get_alpaca_client()
     if not client:
         logger.error("Alpaca client not available")
@@ -140,16 +170,42 @@ def execute_alpaca_trade(ticker, action, quantity, current_price):
                     # This is a new short position, no special handling needed
                     pass
         
-        # Calculate stop loss and take profit prices
+        # Calculate stop loss and take profit prices using dynamic ATR-based values if available
         stop_loss_price = None
         take_profit_price = None
         
-        if action == "buy":
-            # Calculate stop loss (5% below purchase price by default)
-            stop_loss_price = current_price * (1 - RISK_PARAMS["STOP_LOSS_PCT"])
-            # Calculate take profit (20% above purchase price by default)
-            take_profit_price = current_price * (1 + RISK_PARAMS["TAKE_PROFIT_PCT"])
+        # If price dataframe is available, calculate dynamic stops based on volatility
+        if prices_df is not None and action in ["buy", "short"]:
+            # Get position risk parameters from enhanced risk system
+            position_risk_params = calculate_position_risk_parameters(
+                ticker, current_price, current_price, prices_df
+            )
             
+            if position_risk_params:
+                if action == "buy":
+                    stop_loss_price = position_risk_params['stop_loss_price']
+                    take_profit_price = position_risk_params['take_profit_price']
+                    logger.info(f"Using dynamic ATR-based stops for {ticker}: Stop loss at ${stop_loss_price:.2f}, Take profit at ${take_profit_price:.2f}")
+                elif action == "short":
+                    # For shorts, the stop is above and take profit is below
+                    stop_loss_price = position_risk_params['short_stop_price']
+                    take_profit_price = position_risk_params['short_take_profit_price']
+                    logger.info(f"Using dynamic ATR-based stops for short {ticker}: Stop loss at ${stop_loss_price:.2f}, Take profit at ${take_profit_price:.2f}")
+        
+        # Fall back to fixed percentages if dynamic calculation fails
+        if stop_loss_price is None or take_profit_price is None:
+            if action == "buy":
+                # Calculate stop loss (5% below purchase price by default)
+                stop_loss_price = current_price * (1 - RISK_PARAMS["STOP_LOSS_PCT"])
+                # Calculate take profit (20% above purchase price by default)
+                take_profit_price = current_price * (1 + RISK_PARAMS["TAKE_PROFIT_PCT"])
+            elif action == "short":
+                # For short, the stop loss is above the entry price
+                stop_loss_price = current_price * (1 + RISK_PARAMS["STOP_LOSS_PCT"])
+                # For short, the take profit is below the entry price
+                take_profit_price = current_price * (1 - RISK_PARAMS["TAKE_PROFIT_PCT"])
+        
+        if action == "buy":
             # Use bracket order for buy orders to include stop loss and take profit
             order_data = BracketOrderRequest(
                 symbol=ticker,
@@ -169,11 +225,6 @@ def execute_alpaca_trade(ticker, action, quantity, current_price):
             logger.info(f"Creating bracket order for {ticker}: Stop loss at ${stop_loss_price:.2f}, Take profit at ${take_profit_price:.2f}")
             
         elif action == "short":
-            # For short, the stop loss is above the entry price
-            stop_loss_price = current_price * (1 + RISK_PARAMS["STOP_LOSS_PCT"])
-            # For short, the take profit is below the entry price
-            take_profit_price = current_price * (1 - RISK_PARAMS["TAKE_PROFIT_PCT"])
-            
             # Use bracket order for short orders as well
             order_data = BracketOrderRequest(
                 symbol=ticker,
@@ -297,6 +348,93 @@ def get_alpaca_portfolio_state(client, tickers):
         return None
 
 
+def apply_sector_correlation_adjustments(ticker, decision, quantity, portfolio):
+    """Apply position size adjustments based on sector exposure and correlation risk"""
+    # Original quantity
+    original_quantity = quantity
+    adjusted_quantity = quantity
+    adjustment_reasons = []
+    
+    # Check sector exposure
+    try:
+        sector_exposures = track_sector_exposure(portfolio)
+        over_exposed_sectors = check_sector_limits(sector_exposures)
+        
+        # Get the ticker's sector
+        ticker_sector = None
+        for sector, tickers in sector_exposures.items():
+            if ticker in tickers:
+                ticker_sector = sector
+                break
+        
+        # If ticker is in an over-exposed sector, reduce position size
+        if ticker_sector and ticker_sector in over_exposed_sectors:
+            current_exposure = over_exposed_sectors[ticker_sector]["current_exposure"]
+            max_allowed = over_exposed_sectors[ticker_sector]["max_allowed"]
+            overexposure_ratio = current_exposure / max_allowed if max_allowed > 0 else 2.0
+            
+            # Apply a graduated reduction based on how overexposed the sector is
+            if overexposure_ratio >= 2.0:
+                # Extremely overexposed - reduce by 70%
+                sector_adjusted = int(adjusted_quantity * 0.3)
+                adjustment_reasons.append(f"Sector {ticker_sector} extremely overexposed ({current_exposure:.1f}% vs {max_allowed:.1f}% limit)")
+            elif overexposure_ratio >= 1.5:
+                # Significantly overexposed - reduce by 50%
+                sector_adjusted = int(adjusted_quantity * 0.5)
+                adjustment_reasons.append(f"Sector {ticker_sector} significantly overexposed ({current_exposure:.1f}% vs {max_allowed:.1f}% limit)")
+            else:
+                # Moderately overexposed - reduce by 30%
+                sector_adjusted = int(adjusted_quantity * 0.7)
+                adjustment_reasons.append(f"Sector {ticker_sector} moderately overexposed ({current_exposure:.1f}% vs {max_allowed:.1f}% limit)")
+            
+            adjusted_quantity = max(1, sector_adjusted)
+    except Exception as e:
+        logger.warning(f"Error checking sector exposure for {ticker}: {e}")
+    
+    # Check correlation risk
+    try:
+        correlation_risks = check_correlation_risk(portfolio)
+        high_correlation_tickers = []
+        
+        # Find correlated assets
+        for corr_pair in correlation_risks:
+            if ticker in corr_pair["tickers"]:
+                # Extract the other ticker from the pair
+                other_ticker = corr_pair["tickers"][0] if corr_pair["tickers"][1] == ticker else corr_pair["tickers"][1]
+                high_correlation_tickers.append((other_ticker, corr_pair["correlation"]))
+        
+        # If we have high correlations, adjust position size
+        if high_correlation_tickers:
+            # Sort by correlation strength (highest first)
+            high_correlation_tickers.sort(key=lambda x: x[1], reverse=True)
+            
+            # Find highest correlation value
+            highest_corr_ticker, highest_corr = high_correlation_tickers[0]
+            
+            # Apply adjustment based on correlation strength
+            if highest_corr >= 0.9:
+                # Extremely high correlation - reduce by 60%
+                corr_adjusted = int(adjusted_quantity * 0.4)
+                adjustment_reasons.append(f"Extremely high correlation ({highest_corr:.2f}) with {highest_corr_ticker}")
+            elif highest_corr >= 0.8:
+                # High correlation - reduce by 40%
+                corr_adjusted = int(adjusted_quantity * 0.6)
+                adjustment_reasons.append(f"High correlation ({highest_corr:.2f}) with {highest_corr_ticker}")
+            elif highest_corr >= 0.7:
+                # Moderate correlation - reduce by 20%
+                corr_adjusted = int(adjusted_quantity * 0.8)
+                adjustment_reasons.append(f"Moderate correlation ({highest_corr:.2f}) with {highest_corr_ticker}")
+            else:
+                corr_adjusted = adjusted_quantity
+            
+            adjusted_quantity = max(1, corr_adjusted)
+    except Exception as e:
+        logger.warning(f"Error checking correlation risk for {ticker}: {e}")
+    
+    # Return the adjusted quantity and reasons
+    return adjusted_quantity, adjustment_reasons
+
+
 ##### Portfolio Management Agent #####
 def portfolio_management_agent(state: AgentState):
     """Makes final trading decisions and generates orders for multiple tickers"""
@@ -305,6 +443,7 @@ def portfolio_management_agent(state: AgentState):
     portfolio = state["data"]["portfolio"]
     analyst_signals = state["data"]["analyst_signals"]
     tickers = state["data"]["tickers"]
+    price_data = state["data"].get("price_data", {})
 
     # If live trading is enabled, try to get current portfolio state from Alpaca
     if LIVE_TRADING_ENABLED:
@@ -321,7 +460,7 @@ def portfolio_management_agent(state: AgentState):
                 
                 # Initialize risk management with portfolio value if not already set
                 portfolio_value = float(alpaca_client.get_account().equity)
-                reset_daily_state(portfolio_value)
+                update_portfolio_value(portfolio_value)
             else:
                 logger.warning("Could not get portfolio state from Alpaca, using existing portfolio data")
         else:
@@ -329,11 +468,24 @@ def portfolio_management_agent(state: AgentState):
 
     progress.update_status("portfolio_management_agent", None, "Analyzing signals")
 
+    # Generate comprehensive risk dashboard if we have price data
+    risk_dashboard = None
+    market_data = price_data.get('SPY', None)
+    if market_data is not None:
+        try:
+            progress.update_status("portfolio_management_agent", None, "Generating risk dashboard")
+            risk_dashboard = generate_risk_dashboard(portfolio, tickers, price_data)
+            logger.info("Successfully generated comprehensive risk dashboard")
+        except Exception as e:
+            logger.warning(f"Failed to generate risk dashboard: {e}")
+
     # Get position limits, current prices, and signals for every ticker
     position_limits = {}
     current_prices = {}
     max_shares = {}
     signals_by_ticker = {}
+    prices_by_ticker = {}
+    
     for ticker in tickers:
         progress.update_status("portfolio_management_agent", ticker, "Processing analyst signals")
 
@@ -341,6 +493,9 @@ def portfolio_management_agent(state: AgentState):
         risk_data = analyst_signals.get("risk_management_agent", {}).get(ticker, {})
         position_limits[ticker] = risk_data.get("remaining_position_limit", 0)
         current_prices[ticker] = risk_data.get("current_price", 0)
+        
+        # Store price data for use in trade execution
+        prices_by_ticker[ticker] = price_data.get(ticker)
         
         # Get max shares directly from risk manager if available, otherwise calculate it
         if "max_shares" in risk_data:
@@ -373,6 +528,7 @@ def portfolio_management_agent(state: AgentState):
         current_prices=current_prices,
         max_shares=max_shares,
         portfolio=portfolio,
+        risk_dashboard=risk_dashboard,
         model_name=state["metadata"]["model_name"],
         model_provider=state["metadata"]["model_provider"],
     )
@@ -400,18 +556,68 @@ def portfolio_management_agent(state: AgentState):
             # Execute trades if not in circuit breaker mode
             for ticker, decision in result.decisions.items():
                 if decision.action != "hold" and decision.quantity > 0:
-                    progress.update_status(
-                        "portfolio_management_agent", 
-                        ticker, 
-                        f"Executing {decision.action} order for {decision.quantity} shares"
+                    # First perform time-based risk check for earnings and market hours
+                    risk_adjustment_needed = False
+                    risk_reasons = []
+                    
+                    # Check market hours for high risk periods
+                    market_hours = check_market_hours()
+                    if market_hours["high_risk_period"]:
+                        risk_adjustment_needed = True
+                        risk_reasons.append(f"Market timing risk: {market_hours['reason']}")
+                    
+                    # Check for upcoming earnings announcements 
+                    try:
+                        next_earnings = get_next_earnings_date(ticker)
+                        if next_earnings and next_earnings.get("days_until_earnings", 100) <= 5:
+                            risk_adjustment_needed = True
+                            risk_reasons.append(f"Earnings announcement in {next_earnings['days_until_earnings']} days")
+                    except Exception as e:
+                        logger.warning(f"Error checking earnings for {ticker}: {e}")
+                    
+                    # Apply time-based risk adjustments if needed
+                    original_quantity = decision.quantity
+                    if risk_adjustment_needed:
+                        # Reduce position size by 40% for high risk periods
+                        adjusted_quantity = max(1, int(decision.quantity * 0.6))
+                        decision.quantity = adjusted_quantity
+                        logger.warning(f"{ticker}: Time-based risk factors: {', '.join(risk_reasons)}. Reducing order from {original_quantity} to {adjusted_quantity} shares")
+                    
+                    # Apply sector and correlation adjustments
+                    progress.update_status("portfolio_management_agent", ticker, "Checking sector and correlation risk")
+                    adjusted_quantity, adjustment_reasons = apply_sector_correlation_adjustments(
+                        ticker, decision.action, decision.quantity, portfolio
                     )
                     
-                    success = execute_alpaca_trade(ticker, decision.action, decision.quantity, current_prices[ticker])
+                    if adjusted_quantity != decision.quantity:
+                        original_quantity = decision.quantity
+                        decision.quantity = adjusted_quantity
+                        logger.warning(f"{ticker}: {', '.join(adjustment_reasons)}. Reducing order from {original_quantity} to {adjusted_quantity} shares")
                     
-                    if success:
-                        logger.info(f"Successfully executed {decision.action} order for {decision.quantity} shares of {ticker}")
+                    # Execute the trade if quantity is still positive after all risk adjustments
+                    if decision.quantity > 0:
+                        progress.update_status(
+                            "portfolio_management_agent", 
+                            ticker, 
+                            f"Executing {decision.action} order for {decision.quantity} shares"
+                        )
+                        
+                        # Pass price data to execute_alpaca_trade for dynamic risk calculations
+                        ticker_prices = prices_by_ticker.get(ticker)
+                        success = execute_alpaca_trade(
+                            ticker, 
+                            decision.action, 
+                            decision.quantity, 
+                            current_prices[ticker],
+                            prices_df=ticker_prices
+                        )
+                        
+                        if success:
+                            logger.info(f"Successfully executed {decision.action} order for {decision.quantity} shares of {ticker}")
+                        else:
+                            logger.warning(f"Failed to execute {decision.action} order for {decision.quantity} shares of {ticker}")
                     else:
-                        logger.warning(f"Failed to execute {decision.action} order for {decision.quantity} shares of {ticker}")
+                        logger.warning(f"Order for {ticker} canceled due to risk management: Quantity reduced to 0 after all risk adjustments")
     else:
         progress.update_status("portfolio_management_agent", None, "Live trading disabled (simulation only)")
 
@@ -429,6 +635,7 @@ def generate_trading_decision(
     current_prices: dict[str, float],
     max_shares: dict[str, int],
     portfolio: dict[str, float],
+    risk_dashboard: dict,
     model_name: str,
     model_provider: str,
 ) -> PortfolioManagerOutput:
@@ -457,6 +664,16 @@ def generate_trading_decision(
               - Consider both long and short opportunities based on signals
               - Maintain appropriate risk management with both long and short exposure
               - Trades will have automated stop losses to protect against significant losses
+              
+              Enhanced Risk Guidelines:
+              - Sector Exposure: Reduce position sizes in sectors that are already heavily weighted in the portfolio
+              - Correlation Risk: Avoid concentrated positions in highly correlated assets
+              - Market Regime: Adjust risk appetite based on the current market regime (bull, bear, or correction)
+              - Liquidity Constraints: Be more cautious with less liquid assets
+              - Volatility-Based Risk: Higher volatility assets should have smaller position sizes
+              - Time-Based Risk: Consider earnings announcements and market hours in your decisions
+              - Portfolio Diversification: Maintain appropriate diversification across sectors and asset types
+              - Circuit Breaker Awareness: Respect circuit breaker status in risk decisions
 
               Available Actions:
               - "buy": Open or add to long position
@@ -472,6 +689,7 @@ def generate_trading_decision(
               - portfolio_positions: current positions (both long and short)
               - current_prices: current prices for each ticker
               - margin_requirement: current margin requirement for short positions
+              - risk_dashboard: comprehensive risk dashboard for the portfolio
               """,
             ),
             (
@@ -490,6 +708,7 @@ def generate_trading_decision(
               Portfolio Cash: {portfolio_cash}
               Current Positions: {portfolio_positions}
               Current Margin Requirement: {margin_requirement}
+              Risk Dashboard: {risk_dashboard}
 
               Output strictly in JSON with the following structure:
               {{
@@ -520,6 +739,7 @@ def generate_trading_decision(
             "portfolio_cash": f"{portfolio.get('cash', 0):.2f}",
             "portfolio_positions": json.dumps(portfolio.get('positions', {}), indent=2),
             "margin_requirement": f"{portfolio.get('margin_requirement', 0):.2f}",
+            "risk_dashboard": json.dumps(risk_dashboard, indent=2) if risk_dashboard else "{}",
         }
     )
 
