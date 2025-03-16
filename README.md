@@ -17,9 +17,9 @@ This system employs several agents working together:
 11. Risk Manager - Calculates risk metrics and sets position limits
 12. Portfolio Manager - Makes final trading decisions and generates orders
 
-<img width="1020" alt="Screenshot 2025-03-08 at 4 45 22 PM" src="https://github.com/user-attachments/assets/d8ab891e-a083-4fed-b514-ccc9322a3e57" />
+<img width="1020" alt="Screenshot 2025-03-08 at 4 45 22 PM" src="https://github.com/user-attachments/assets/d8ab891e-a083-4fed-b514-ccc9322a3e57" />
 
-**Note**: the system simulates trading decisions, it does not actually trade.
+**Note**: the system simulates trading decisions, it does not actually trade unless you enable live trading with Alpaca.
 
 [![Twitter Follow](https://img.shields.io/twitter/follow/virattt?style=social)](https://twitter.com/virattt)
 
@@ -82,6 +82,13 @@ GROQ_API_KEY=your-groq-api-key
 # For getting financial data to power the hedge fund
 # Get your Financial Datasets API key from https://financialdatasets.ai/
 FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
+
+# For live trading with Alpaca
+# Get your Alpaca API keys from https://app.alpaca.markets/
+ALPACA_API_KEY=your-alpaca-api-key
+ALPACA_API_SECRET=your-alpaca-api-secret
+# Set to "true" to enable live trading (default is "false", which only simulates trades)
+LIVE_TRADING=false
 ```
 
 **Important**: You must set `OPENAI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY` for the hedge fund to work.  If you want to use LLMs from all providers, you will need to set all API keys.
@@ -89,6 +96,8 @@ FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
 Financial data for AAPL, GOOGL, MSFT, NVDA, and TSLA is free and does not require an API key.
 
 For any other ticker, you will need to set the `FINANCIAL_DATASETS_API_KEY` in the .env file.
+
+For live trading, you will need to set `ALPACA_API_KEY` and `ALPACA_API_SECRET` in the .env file, and set `LIVE_TRADING=true`.
 
 ## Usage
 
@@ -98,7 +107,7 @@ poetry run python src/main.py --ticker AAPL,MSFT,NVDA
 ```
 
 **Example Output:**
-<img width="992" alt="Screenshot 2025-01-06 at 5 50 17 PM" src="https://github.com/user-attachments/assets/e8ca04bf-9989-4a7d-a8b4-34e04666663b" />
+<img width="992" alt="Screenshot 2025-01-06 at 5 50 17 PM" src="https://github.com/user-attachments/assets/e8ca04bf-9989-4a7d-a8b4-34e04666663b" />
 
 You can also specify a `--show-reasoning` flag to print the reasoning of each agent to the console.
 
@@ -111,6 +120,29 @@ You can optionally specify the start and end dates to make decisions for a speci
 poetry run python src/main.py --ticker AAPL,MSFT,NVDA --start-date 2024-01-01 --end-date 2024-03-01 
 ```
 
+### Live Trading with Alpaca
+To enable live trading with Alpaca, set the following in your `.env` file:
+```
+ALPACA_API_KEY=your-alpaca-api-key
+ALPACA_API_SECRET=your-alpaca-api-secret
+LIVE_TRADING=true
+```
+
+When live trading is enabled, the portfolio manager will execute trades through Alpaca based on the agent's decisions. By default, trades are executed on Alpaca's paper trading API, which allows you to test the system with simulated trades before risking real money.
+
+You can also include all your current Alpaca holdings in the analysis using the `--include-alpaca-holdings` flag:
+```bash
+# Analyze specific tickers plus all current Alpaca holdings
+poetry run python src/main.py --ticker AAPL,MSFT --include-alpaca-holdings
+
+# Or analyze only your current Alpaca holdings without specifying additional tickers
+poetry run python src/main.py --include-alpaca-holdings
+```
+
+This ensures the hedge fund makes decisions about all positions in your portfolio, not just the ones you manually specify.
+
+**IMPORTANT**: Before enabling live trading with real funds, thoroughly test the system with paper trading and understand the risks involved.
+
 ### Running the Backtester
 
 ```bash
@@ -118,12 +150,21 @@ poetry run python src/backtester.py --ticker AAPL,MSFT,NVDA
 ```
 
 **Example Output:**
-<img width="941" alt="Screenshot 2025-01-06 at 5 47 52 PM" src="https://github.com/user-attachments/assets/00e794ea-8628-44e6-9a84-8f8a31ad3b47" />
+<img width="941" alt="Screenshot 2025-01-06 at 5 47 52 PM" src="https://github.com/user-attachments/assets/00e794ea-8628-44e6-9a84-8f8a31ad3b47" />
 
 You can optionally specify the start and end dates to backtest over a specific time period.
 
 ```bash
 poetry run python src/backtester.py --ticker AAPL,MSFT,NVDA --start-date 2024-01-01 --end-date 2024-03-01
+```
+
+Like with the main hedge fund mode, you can also include your current Alpaca holdings in the backtest:
+```bash
+# Backtest specific tickers plus all current Alpaca holdings
+poetry run python src/backtester.py --ticker AAPL,MSFT --include-alpaca-holdings
+
+# Or backtest only your current Alpaca holdings without specifying additional tickers
+poetry run python src/backtester.py --include-alpaca-holdings
 ```
 
 ## Project Structure 
@@ -139,10 +180,12 @@ ai-hedge-fund/
 │   │   ├── technicals.py         # Technical analysis agent
 │   │   ├── valuation.py          # Valuation analysis agent
 │   │   ├── warren_buffett.py     # Warren Buffett agent
+│   │   ├── ben_graham.py         # Ben Graham agent
+│   │   ├── ...
 │   ├── tools/                    # Agent tools
 │   │   ├── api.py                # API tools
 │   ├── backtester.py             # Backtesting tools
-│   ├── main.py # Main entry point
+│   ├── main.py                   # Main entry point
 ├── pyproject.toml
 ├── ...
 ```

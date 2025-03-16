@@ -1,12 +1,30 @@
 import json
+import os
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
+import logging
 
 from graph.state import AgentState, show_agent_reasoning
 from pydantic import BaseModel, Field
 from typing_extensions import Literal
 from utils.progress import progress
 from utils.llm import call_llm
+
+# Import alpaca-py for live trading
+try:
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    ALPACA_AVAILABLE = True
+except ImportError:
+    ALPACA_AVAILABLE = False
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('portfolio_manager')
+
+# Check for live trading environment variable
+LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
 
 class PortfolioDecision(BaseModel):
@@ -20,6 +38,173 @@ class PortfolioManagerOutput(BaseModel):
     decisions: dict[str, PortfolioDecision] = Field(description="Dictionary of ticker to trading decisions")
 
 
+def get_alpaca_client():
+    """Initialize and return Alpaca trading client if credentials are available"""
+    if not ALPACA_AVAILABLE:
+        logger.warning("Alpaca SDK not installed. Run 'pip install alpaca-py' to enable live trading.")
+        return None
+
+    api_key = os.getenv("ALPACA_API_KEY")
+    api_secret = os.getenv("ALPACA_API_SECRET")
+    
+    if not api_key or not api_secret:
+        logger.warning("Alpaca API credentials not found in environment variables.")
+        return None
+    
+    try:
+        return TradingClient(api_key, api_secret, paper=True)
+    except Exception as e:
+        logger.error(f"Failed to initialize Alpaca client: {e}")
+        return None
+
+
+def execute_alpaca_trade(ticker, action, quantity):
+    """Execute a trade using Alpaca API"""
+    if quantity <= 0:
+        logger.info(f"Skipping {action} order for {ticker}: quantity must be > 0")
+        return False
+    
+    client = get_alpaca_client()
+    if not client:
+        logger.error("Alpaca client not available")
+        return False
+    
+    # Map our action to Alpaca's OrderSide and determine if it's a short order
+    side_mapping = {
+        "buy": OrderSide.BUY,
+        "sell": OrderSide.SELL,
+        "short": OrderSide.SELL,
+        "cover": OrderSide.BUY
+    }
+    
+    if action not in side_mapping:
+        logger.error(f"Unsupported action: {action}")
+        return False
+    
+    side = side_mapping[action]
+    
+    try:
+        # For short and cover, we need to check the current position
+        if action in ["short", "cover"]:
+            # Get the current position
+            try:
+                position = client.get_position(ticker)
+                current_qty = int(position.qty)
+                
+                # Handle cover (closing a short position)
+                if action == "cover":
+                    if current_qty >= 0:  # Not a short position
+                        logger.warning(f"Cannot cover {ticker}: No short position exists")
+                        return False
+                    
+                    # Limit quantity to current short position
+                    if abs(current_qty) < quantity:
+                        logger.info(f"Adjusting cover quantity from {quantity} to {abs(current_qty)} for {ticker}")
+                        quantity = abs(current_qty)
+                        
+                # Handle short (opening/increasing a short position)
+                # No special handling needed beyond the order request
+                
+            except Exception as e:
+                # Position doesn't exist
+                if action == "cover":
+                    logger.warning(f"Cannot cover {ticker}: No position exists")
+                    return False
+        
+        # Create the order request
+        order_data = MarketOrderRequest(
+            symbol=ticker,
+            qty=quantity,
+            side=side,
+            time_in_force=TimeInForce.DAY
+        )
+        
+        # Submit the order
+        order = client.submit_order(order_data)
+        logger.info(f"Submitted {action} order for {quantity} shares of {ticker}: Order ID {order.id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to submit {action} order for {ticker}: {e}")
+        return False
+
+
+def get_alpaca_portfolio_state(client, tickers):
+    """Get current portfolio state from Alpaca API"""
+    if not client:
+        return None
+    
+    try:
+        # Get account information
+        account = client.get_account()
+        
+        # Initialize portfolio structure
+        portfolio = {
+            "cash": float(account.cash),
+            "positions": {},
+            "margin_requirement": 0.0,  # We'll calculate this based on positions
+        }
+        
+        # Get all positions
+        all_positions = {}
+        try:
+            positions = client.get_all_positions()
+            for position in positions:
+                all_positions[position.symbol] = position
+        except Exception as e:
+            logger.warning(f"Failed to get positions from Alpaca: {e}")
+        
+        # Organize positions by ticker
+        for ticker in tickers:
+            position = all_positions.get(ticker)
+            
+            if position:
+                qty = int(position.qty)
+                market_value = float(position.market_value)
+                cost_basis = float(position.cost_basis)
+                
+                # Determine if long or short position
+                if qty > 0:  # Long position
+                    portfolio["positions"][ticker] = {
+                        "long": qty,
+                        "short": 0,
+                        "long_cost_basis": cost_basis / qty if qty > 0 else 0.0,
+                        "short_cost_basis": 0.0,
+                        "short_margin_used": 0.0
+                    }
+                elif qty < 0:  # Short position
+                    # For shorts, qty is negative
+                    short_qty = abs(qty)
+                    # Estimate margin requirement at 50% of position value
+                    margin_used = market_value * 0.5
+                    
+                    portfolio["positions"][ticker] = {
+                        "long": 0,
+                        "short": short_qty,
+                        "long_cost_basis": 0.0,
+                        "short_cost_basis": cost_basis / short_qty if short_qty > 0 else 0.0,
+                        "short_margin_used": margin_used
+                    }
+                    
+                    # Add to total margin requirement
+                    portfolio["margin_requirement"] += margin_used
+            else:
+                # No position for this ticker
+                portfolio["positions"][ticker] = {
+                    "long": 0,
+                    "short": 0,
+                    "long_cost_basis": 0.0,
+                    "short_cost_basis": 0.0,
+                    "short_margin_used": 0.0
+                }
+        
+        return portfolio
+    
+    except Exception as e:
+        logger.error(f"Failed to get portfolio state from Alpaca: {e}")
+        return None
+
+
 ##### Portfolio Management Agent #####
 def portfolio_management_agent(state: AgentState):
     """Makes final trading decisions and generates orders for multiple tickers"""
@@ -28,6 +213,23 @@ def portfolio_management_agent(state: AgentState):
     portfolio = state["data"]["portfolio"]
     analyst_signals = state["data"]["analyst_signals"]
     tickers = state["data"]["tickers"]
+
+    # If live trading is enabled, try to get current portfolio state from Alpaca
+    if LIVE_TRADING_ENABLED:
+        progress.update_status("portfolio_management_agent", None, "Getting current portfolio state from Alpaca")
+        
+        alpaca_client = get_alpaca_client()
+        if alpaca_client:
+            alpaca_portfolio = get_alpaca_portfolio_state(alpaca_client, tickers)
+            if alpaca_portfolio:
+                logger.info("Using portfolio state from Alpaca")
+                portfolio = alpaca_portfolio
+                # Update the portfolio in the state data for other agents to use
+                state["data"]["portfolio"] = portfolio
+            else:
+                logger.warning("Could not get portfolio state from Alpaca, using existing portfolio data")
+        else:
+            logger.warning("Alpaca client not available, using existing portfolio data")
 
     progress.update_status("portfolio_management_agent", None, "Analyzing signals")
 
@@ -79,6 +281,27 @@ def portfolio_management_agent(state: AgentState):
     # Print the decision if the flag is set
     if state["metadata"]["show_reasoning"]:
         show_agent_reasoning({ticker: decision.model_dump() for ticker, decision in result.decisions.items()}, "Portfolio Management Agent")
+
+    # Execute trades with Alpaca if live trading is enabled
+    if LIVE_TRADING_ENABLED:
+        progress.update_status("portfolio_management_agent", None, "Executing live trades on Alpaca")
+        
+        for ticker, decision in result.decisions.items():
+            if decision.action != "hold" and decision.quantity > 0:
+                progress.update_status(
+                    "portfolio_management_agent", 
+                    ticker, 
+                    f"Executing {decision.action} order for {decision.quantity} shares"
+                )
+                
+                success = execute_alpaca_trade(ticker, decision.action, decision.quantity)
+                
+                if success:
+                    logger.info(f"Successfully executed {decision.action} order for {decision.quantity} shares of {ticker}")
+                else:
+                    logger.warning(f"Failed to execute {decision.action} order for {decision.quantity} shares of {ticker}")
+    else:
+        progress.update_status("portfolio_management_agent", None, "Live trading disabled (simulation only)")
 
     progress.update_status("portfolio_management_agent", None, "Done")
 

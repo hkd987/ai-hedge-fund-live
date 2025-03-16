@@ -1,4 +1,6 @@
 import sys
+import os
+import logging
 
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -12,7 +14,7 @@ import itertools
 
 from llm.models import LLM_ORDER, get_model_info
 from utils.analysts import ANALYST_ORDER
-from main import run_hedge_fund
+from main import run_hedge_fund, get_alpaca_holdings
 from tools.api import (
     get_company_news,
     get_price_data,
@@ -24,6 +26,10 @@ from utils.display import print_backtest_results, format_backtest_row
 from typing_extensions import Callable
 
 init(autoreset=True)
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('backtester')
 
 
 class Backtester:
@@ -626,6 +632,11 @@ if __name__ == "__main__":
         help="Comma-separated list of stock ticker symbols (e.g., AAPL,MSFT,GOOGL)",
     )
     parser.add_argument(
+        "--include-alpaca-holdings",
+        action="store_true",
+        help="Include all current holdings from Alpaca account in addition to tickers specified",
+    )
+    parser.add_argument(
         "--end-date",
         type=str,
         default=datetime.now().strftime("%Y-%m-%d"),
@@ -652,8 +663,32 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Parse tickers from comma-separated string
-    tickers = [ticker.strip() for ticker in args.tickers.split(",")] if args.tickers else []
+    # Get tickers from various sources
+    all_tickers = []
+    
+    # Add manually specified tickers
+    if args.tickers:
+        manual_tickers = [ticker.strip() for ticker in args.tickers.split(",")]
+        all_tickers.extend(manual_tickers)
+        print(f"Using manually specified tickers: {', '.join(manual_tickers)}")
+    
+    # Add Alpaca holdings if flag is set
+    if args.include_alpaca_holdings:
+        alpaca_holdings = get_alpaca_holdings()
+        # Only add unique tickers not already in the list
+        for ticker in alpaca_holdings:
+            if ticker not in all_tickers:
+                all_tickers.append(ticker)
+        
+        if alpaca_holdings:
+            print(f"Added {len(alpaca_holdings)} tickers from Alpaca holdings")
+    
+    # Ensure we have at least one ticker to analyze
+    if not all_tickers:
+        print("Error: No tickers specified. Use --tickers or --include-alpaca-holdings to specify tickers.")
+        sys.exit(1)
+    
+    print(f"\nBacktesting the following tickers: {', '.join(all_tickers)}")
 
     # Choose analysts
     selected_analysts = None
@@ -709,7 +744,7 @@ if __name__ == "__main__":
     # Create and run the backtester
     backtester = Backtester(
         agent=run_hedge_fund,
-        tickers=tickers,
+        tickers=all_tickers,
         start_date=args.start_date,
         end_date=args.end_date,
         initial_capital=args.initial_capital,

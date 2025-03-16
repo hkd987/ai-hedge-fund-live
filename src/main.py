@@ -1,4 +1,5 @@
 import sys
+import os
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
@@ -26,11 +27,23 @@ from dateutil.relativedelta import relativedelta
 from tabulate import tabulate
 from utils.visualize import save_graph_as_png
 import json
+import logging
+
+# For Alpaca holdings integration
+try:
+    from alpaca.trading.client import TradingClient
+    ALPACA_AVAILABLE = True
+except ImportError:
+    ALPACA_AVAILABLE = False
 
 # Load environment variables from .env file
 load_dotenv()
 
 init(autoreset=True)
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('main')
 
 
 def parse_hedge_fund_response(response):
@@ -47,6 +60,40 @@ def parse_hedge_fund_response(response):
         print(f"Unexpected error while parsing response: {e}\nResponse: {repr(response)}")
         return None
 
+
+def get_alpaca_holdings():
+    """Fetch all current holdings from Alpaca account"""
+    if not ALPACA_AVAILABLE:
+        logger.warning("Alpaca SDK not installed. Run 'pip install alpaca-py' to include Alpaca holdings.")
+        return []
+
+    api_key = os.getenv("ALPACA_API_KEY")
+    api_secret = os.getenv("ALPACA_API_SECRET")
+    
+    if not api_key or not api_secret:
+        logger.warning("Alpaca API credentials not found in environment variables.")
+        return []
+    
+    try:
+        # Initialize Alpaca client
+        client = TradingClient(api_key, api_secret, paper=True)
+        
+        # Get all positions
+        positions = client.get_all_positions()
+        
+        # Extract tickers from positions
+        holdings = [position.symbol for position in positions]
+        
+        if holdings:
+            logger.info(f"Found {len(holdings)} holdings in Alpaca account: {', '.join(holdings)}")
+        else:
+            logger.info("No holdings found in Alpaca account")
+            
+        return holdings
+        
+    except Exception as e:
+        logger.error(f"Failed to get holdings from Alpaca: {e}")
+        return []
 
 
 ##### Run the Hedge Fund #####
@@ -154,7 +201,12 @@ if __name__ == "__main__":
         default=0.0,
         help="Initial margin requirement. Defaults to 0.0"
     )
-    parser.add_argument("--tickers", type=str, required=True, help="Comma-separated list of stock ticker symbols")
+    parser.add_argument("--tickers", type=str, required=False, help="Comma-separated list of stock ticker symbols")
+    parser.add_argument(
+        "--include-alpaca-holdings",
+        action="store_true",
+        help="Include all current holdings from Alpaca account in addition to tickers specified"
+    )
     parser.add_argument(
         "--start-date",
         type=str,
@@ -168,8 +220,32 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Parse tickers from comma-separated string
-    tickers = [ticker.strip() for ticker in args.tickers.split(",")]
+    # Get tickers from various sources
+    all_tickers = []
+    
+    # Add manually specified tickers
+    if args.tickers:
+        manual_tickers = [ticker.strip() for ticker in args.tickers.split(",")]
+        all_tickers.extend(manual_tickers)
+        print(f"Using manually specified tickers: {', '.join(manual_tickers)}")
+    
+    # Add Alpaca holdings if flag is set
+    if args.include_alpaca_holdings:
+        alpaca_holdings = get_alpaca_holdings()
+        # Only add unique tickers not already in the list
+        for ticker in alpaca_holdings:
+            if ticker not in all_tickers:
+                all_tickers.append(ticker)
+        
+        if alpaca_holdings:
+            print(f"Added {len(alpaca_holdings)} tickers from Alpaca holdings")
+    
+    # Ensure we have at least one ticker to analyze
+    if not all_tickers:
+        print("Error: No tickers specified. Use --tickers or --include-alpaca-holdings to specify tickers.")
+        sys.exit(1)
+    
+    print(f"\nAnalyzing the following tickers: {', '.join(all_tickers)}")
 
     # Select analysts
     selected_analysts = None
@@ -264,19 +340,19 @@ if __name__ == "__main__":
                 "short": 0,  # Number of shares held short
                 "long_cost_basis": 0.0,  # Average cost basis for long positions
                 "short_cost_basis": 0.0,  # Average price at which shares were sold short
-            } for ticker in tickers
+            } for ticker in all_tickers
         },
         "realized_gains": {
             ticker: {
                 "long": 0.0,  # Realized gains from long positions
                 "short": 0.0,  # Realized gains from short positions
-            } for ticker in tickers
+            } for ticker in all_tickers
         }
     }
 
     # Run the hedge fund
     result = run_hedge_fund(
-        tickers=tickers,
+        tickers=all_tickers,
         start_date=start_date,
         end_date=end_date,
         portfolio=portfolio,
