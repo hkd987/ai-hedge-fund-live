@@ -144,6 +144,110 @@ def get_alpaca_holdings():
         return []
 
 
+def initialize_portfolio_from_alpaca(tickers):
+    """
+    Initialize the portfolio with data from Alpaca in live trading mode.
+    This ensures we start with actual cash balances and margin requirements.
+    """
+    if not LIVE_TRADING_ENABLED or not ALPACA_AVAILABLE:
+        logger.info("Not using Alpaca for portfolio initialization (either live trading is disabled or Alpaca SDK not available)")
+        return None
+    
+    client = get_alpaca_client()
+    if not client:
+        logger.warning("Could not initialize Alpaca client for portfolio initialization")
+        return None
+    
+    try:
+        # Get account information
+        account = client.get_account()
+        
+        # Initialize portfolio structure
+        portfolio = {
+            "cash": float(account.cash),
+            "positions": {},
+            "margin_requirement": 0.0,  # We'll calculate this based on positions
+            "realized_gains": {}
+        }
+        
+        logger.info(f"Initialized portfolio with ${portfolio['cash']:.2f} cash from Alpaca account")
+        
+        # Get all positions
+        all_positions = {}
+        try:
+            positions = client.get_all_positions()
+            for position in positions:
+                all_positions[position.symbol] = position
+        except Exception as e:
+            logger.warning(f"Failed to get positions from Alpaca: {e}")
+        
+        # Organize positions by ticker
+        for ticker in tickers:
+            position = all_positions.get(ticker)
+            portfolio["realized_gains"][ticker] = {
+                "long": 0.0,
+                "short": 0.0,
+            }
+            
+            if position:
+                qty = int(position.qty)
+                market_value = float(position.market_value)
+                cost_basis = float(position.cost_basis)
+                
+                # Determine if long or short position
+                if qty > 0:  # Long position
+                    portfolio["positions"][ticker] = {
+                        "long": qty,
+                        "short": 0,
+                        "long_cost_basis": cost_basis / qty if qty > 0 else 0.0,
+                        "short_cost_basis": 0.0,
+                        "short_margin_used": 0.0
+                    }
+                    logger.info(f"Found long position for {ticker}: {qty} shares at ${cost_basis / qty:.2f} cost basis")
+                elif qty < 0:  # Short position
+                    # For shorts, qty is negative
+                    short_qty = abs(qty)
+                    # Estimate margin requirement at 50% of position value
+                    margin_used = market_value * 0.5
+                    
+                    portfolio["positions"][ticker] = {
+                        "long": 0,
+                        "short": short_qty,
+                        "long_cost_basis": 0.0,
+                        "short_cost_basis": cost_basis / short_qty if short_qty > 0 else 0.0,
+                        "short_margin_used": margin_used
+                    }
+                    
+                    # Add to total margin requirement
+                    portfolio["margin_requirement"] += margin_used
+                    logger.info(f"Found short position for {ticker}: {short_qty} shares at ${cost_basis / short_qty:.2f} cost basis")
+            else:
+                # No position for this ticker
+                portfolio["positions"][ticker] = {
+                    "long": 0,
+                    "short": 0,
+                    "long_cost_basis": 0.0,
+                    "short_cost_basis": 0.0,
+                    "short_margin_used": 0.0
+                }
+        
+        # Calculate total portfolio value including both long and short positions
+        portfolio_value = float(account.equity)
+        
+        # Initialize risk management with portfolio value
+        from utils.risk_manager import reset_daily_state
+        reset_daily_state(portfolio_value)
+        
+        logger.info(f"Successfully initialized portfolio from Alpaca with total value: ${portfolio_value:.2f}")
+        logger.info(f"Using margin requirement: ${portfolio['margin_requirement']:.2f}")
+        
+        return portfolio
+    
+    except Exception as e:
+        logger.error(f"Failed to initialize portfolio from Alpaca: {e}")
+        return None
+
+
 def emergency_liquidate_all_positions():
     """
     Emergency function to liquidate all positions in the portfolio.
@@ -506,25 +610,55 @@ if __name__ == "__main__":
     else:
         start_date = args.start_date
 
-    # Initialize portfolio with cash amount and stock positions
-    portfolio = {
-        "cash": args.initial_cash,  # Initial cash amount
-        "margin_requirement": args.margin_requirement,  # Initial margin requirement
-        "positions": {
-            ticker: {
-                "long": 0,  # Number of shares held long
-                "short": 0,  # Number of shares held short
-                "long_cost_basis": 0.0,  # Average cost basis for long positions
-                "short_cost_basis": 0.0,  # Average price at which shares were sold short
-            } for ticker in all_tickers
-        },
-        "realized_gains": {
-            ticker: {
-                "long": 0.0,  # Realized gains from long positions
-                "short": 0.0,  # Realized gains from short positions
-            } for ticker in all_tickers
+    # Initialize portfolio
+    if LIVE_TRADING_ENABLED:
+        # Try to get portfolio data from Alpaca in live trading mode
+        alpaca_portfolio = initialize_portfolio_from_alpaca(all_tickers)
+        if alpaca_portfolio:
+            portfolio = alpaca_portfolio
+            print(f"{Fore.GREEN}Using actual portfolio data from Alpaca account{Style.RESET_ALL}")
+            print(f"Cash: ${portfolio['cash']:.2f}, Margin Requirement: ${portfolio['margin_requirement']:.2f}")
+        else:
+            # Fall back to default initialization if Alpaca data retrieval fails
+            print(f"{Fore.YELLOW}Could not retrieve Alpaca portfolio data, using default values{Style.RESET_ALL}")
+            portfolio = {
+                "cash": args.initial_cash,
+                "margin_requirement": args.margin_requirement,
+                "positions": {
+                    ticker: {
+                        "long": 0,
+                        "short": 0,
+                        "long_cost_basis": 0.0,
+                        "short_cost_basis": 0.0,
+                    } for ticker in all_tickers
+                },
+                "realized_gains": {
+                    ticker: {
+                        "long": 0.0,
+                        "short": 0.0,
+                    } for ticker in all_tickers
+                }
+            }
+    else:
+        # Use default values for simulation mode
+        portfolio = {
+            "cash": args.initial_cash,
+            "margin_requirement": args.margin_requirement,
+            "positions": {
+                ticker: {
+                    "long": 0,
+                    "short": 0,
+                    "long_cost_basis": 0.0,
+                    "short_cost_basis": 0.0,
+                } for ticker in all_tickers
+            },
+            "realized_gains": {
+                ticker: {
+                    "long": 0.0,
+                    "short": 0.0,
+                } for ticker in all_tickers
+            }
         }
-    }
 
     # Run the hedge fund
     result = run_hedge_fund(
