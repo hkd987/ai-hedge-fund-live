@@ -1,24 +1,39 @@
-# AI Hedge Fund
+# AI Hedge Fund (Live)
+
+## New Agent Added: William O'Neil
+
+We've implemented a William O'Neil agent that applies the famous CANSLIM methodology to identify high-growth stocks poised for significant price gains. The agent evaluates:
+
+- **C**urrent Quarterly Earnings: Looking for 25%+ quarterly earnings growth
+- **A**nnual Earnings Growth: Seeking consistent year-over-year earnings increases
+- **N**ew Products/Highs: Identifying stocks with innovative products or reaching new highs
+- **S**upply & Demand: Analyzing market cap and trading volume patterns
+- **L**eader vs. Laggard: Finding industry leaders with superior relative strength
+- **I**nstitutional Sponsorship: Detecting smart money accumulation
+- **M**arket Direction: Considering overall market trend for optimal timing
+
+This agent complements our existing analysts by focusing specifically on growth characteristics that have historically produced market-beating returns.
+
+## Overview
 
 This is a proof of concept for an AI-powered hedge fund.  The goal of this project is to explore the use of AI to make trading decisions.  This project is for **educational** purposes only and is not intended for real trading or investment.
 
 This system employs several agents working together:
 
-1. Ben Graham Agent - The godfather of value investing, only buys hidden gems with a margin of safety
-2. Bill Ackman Agent - An activist investors, takes bold positions and pushes for change
-3. Cathie Wood Agent - The queen of growth investing, believes in the power of innovation and disruption
-4. Charlie Munger Agent - Warren Buffett's partner, only buys wonderful businesses at fair prices
-5. Linda Raschke Agent - Short-term technical trader known for her momentum and pattern-based strategies
-6. Mark Minervini Agent - Growth stock momentum trader known for his SEPA methodology and focus on breakouts
-7. Paul Tudor Jones Agent - Technical trading legend known for swing trades based on price action and momentum
-8. Stanley Druckenmiller Agent - Macro trading legend who hunts for asymmetric opportunities with explosive growth potential
-9. Warren Buffett Agent - The oracle of Omaha, seeks wonderful companies at a fair price
-10. Valuation Agent - Calculates the intrinsic value of a stock and generates trading signals
-11. Sentiment Agent - Analyzes market sentiment and generates trading signals
-12. Fundamentals Agent - Analyzes fundamental data and generates trading signals
-13. Technicals Agent - Analyzes technical indicators and generates trading signals
-14. Risk Manager - Calculates risk metrics and sets position limits
-15. Portfolio Manager - Makes final trading decisions and generates orders
+1. **Charlie Munger** - Warren Buffett's partner with a focus on mental models and financial conservatism
+2. **Jesse Livermore** - Legendary speculative trader who focuses on price action, pivot points, and market momentum
+3. **Linda Raschke** - Short-term technical trader known for momentum strategies and market timing techniques
+4. **Mark Minervini** - Growth stock momentum trader known for his SEPA methodology and focus on price/volume breakouts
+5. **Paul Tudor Jones** - Short-term swing trader monitoring sentiment, momentum and market shifts
+6. **Stanley Druckenmiller** - Top-down macro trader who focuses on global economic trends and policy shifts
+7. **William O'Neil** - Growth stock investor and creator of the CANSLIM methodology for identifying market winners
+8. **Warren Buffett** - Value investor looking for businesses with strong economic moats trading below intrinsic value
+9. **Valuation Agent** - Focuses on comparing stocks based on various valuation metrics
+10. **Sentiment Agent** - Reads market sentiment and news to gauge market psychology
+11. **Fundamentals Agent** - Looks at company financial metrics and performance
+12. **Technicals Agent** - Analyzes price patterns, indicators and chart formations
+13. **Risk Manager** - Monitors overall portfolio risk and position sizing
+14. **Portfolio Manager** - Makes final allocation decisions based on all inputs
 
 <img width="1020" alt="Screenshot 2025-03-08 at 4 45 22 PM" src="https://github.com/user-attachments/assets/d8ab891e-a083-4fed-b514-ccc9322a3e57" />
 
