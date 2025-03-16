@@ -8,16 +8,17 @@ This system employs several agents working together:
 2. Bill Ackman Agent - An activist investors, takes bold positions and pushes for change
 3. Cathie Wood Agent - The queen of growth investing, believes in the power of innovation and disruption
 4. Charlie Munger Agent - Warren Buffett's partner, only buys wonderful businesses at fair prices
-5. Mark Minervini Agent - Growth stock momentum trader known for his SEPA methodology and focus on breakouts
-6. Paul Tudor Jones Agent - Technical trading legend known for swing trades based on price action and momentum
-7. Stanley Druckenmiller Agent - Macro trading legend who hunts for asymmetric opportunities with explosive growth potential
-8. Warren Buffett Agent - The oracle of Omaha, seeks wonderful companies at a fair price
-9. Valuation Agent - Calculates the intrinsic value of a stock and generates trading signals
-10. Sentiment Agent - Analyzes market sentiment and generates trading signals
-11. Fundamentals Agent - Analyzes fundamental data and generates trading signals
-12. Technicals Agent - Analyzes technical indicators and generates trading signals
-13. Risk Manager - Calculates risk metrics and sets position limits
-14. Portfolio Manager - Makes final trading decisions and generates orders
+5. Jesse Livermore Agent - Legendary speculative trader focused on price action, pivot points, and market momentum
+6. Mark Minervini Agent - Growth stock momentum trader known for his SEPA methodology and focus on breakouts
+7. Paul Tudor Jones Agent - Technical trading legend known for swing trades based on price action and momentum
+8. Stanley Druckenmiller Agent - Macro trading legend who hunts for asymmetric opportunities with explosive growth potential
+9. Warren Buffett Agent - The oracle of Omaha, seeks wonderful companies at a fair price
+10. Valuation Agent - Calculates the intrinsic value of a stock and generates trading signals
+11. Sentiment Agent - Analyzes market sentiment and generates trading signals
+12. Fundamentals Agent - Analyzes fundamental data and generates trading signals
+13. Technicals Agent - Analyzes technical indicators and generates trading signals
+14. Risk Manager - Calculates risk metrics and sets position limits
+15. Portfolio Manager - Makes final trading decisions and generates orders
 
 <img width="1020" alt="Screenshot 2025-03-08 at 4 45 22 PM" src="https://github.com/user-attachments/assets/d8ab891e-a083-4fed-b514-ccc9322a3e57" />
 
