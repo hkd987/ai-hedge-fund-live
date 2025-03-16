@@ -31,13 +31,28 @@ def call_llm(
     Returns:
         An instance of the specified Pydantic model
     """
-    from llm.models import get_model, get_model_info
+    from llm.models import get_model, get_model_info, ModelProvider
     
     model_info = get_model_info(model_name)
     llm = get_model(model_name, model_provider)
     
     # For non-JSON support models, we can use structured output
     if not (model_info and not model_info.has_json_mode()):
+        # Check if we're using OpenAI and ensure 'json' is in the prompt
+        if model_provider == ModelProvider.OPENAI:
+            # If using a chat message format
+            if hasattr(prompt, "messages"):
+                # Update the last message to include 'json' if it doesn't already
+                last_msg = prompt.messages[-1]
+                if hasattr(last_msg, "content") and "json" not in last_msg.content.lower():
+                    # Append instruction to return as JSON
+                    if isinstance(last_msg.content, str):
+                        new_content = f"{last_msg.content}\n\nReturn your answer as a JSON object."
+                        prompt.messages[-1].content = new_content
+            # If using a simple string prompt
+            elif isinstance(prompt, str) and "json" not in prompt.lower():
+                prompt = f"{prompt}\n\nReturn your answer as a JSON object."
+        
         llm = llm.with_structured_output(
             pydantic_model,
             method="json_mode",
