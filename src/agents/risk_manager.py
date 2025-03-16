@@ -5,8 +5,9 @@ from tools.api import get_prices, prices_to_df
 import json
 import os
 import logging
+import pandas as pd
 
-# Import the risk management utility functions
+# Import the basic risk management utility functions
 from utils.risk_manager import (
     RISK_PARAMS,
     check_position_size_limit,
@@ -15,7 +16,21 @@ from utils.risk_manager import (
     TODAY_STATE
 )
 
-# Try to import VIX data function for volatility adjustment
+# Import enhanced risk management functions 
+from utils.enhanced_risk import (
+    track_sector_exposure,
+    check_sector_limits,
+    check_correlation_risk,
+    detect_market_regime,
+    assess_portfolio_liquidity,
+    calculate_portfolio_beta,
+    adjust_risk_for_timing,
+    calculate_position_risk_parameters,
+    enhance_risk_management,
+    generate_risk_dashboard
+)
+
+# Try to import market data tools
 try:
     from utils.market_data import get_current_vix, ALPACA_AVAILABLE as MARKET_DATA_AVAILABLE
 except ImportError:
@@ -35,6 +50,8 @@ def risk_management_agent(state: AgentState):
     # Initialize risk analysis for each ticker
     risk_analysis = {}
     current_prices = {}  # Store prices here to avoid redundant API calls
+    prices_data = {}  # Store price dataframes for all tickers
+    market_data = None  # Store market data (SPY) for regime detection
 
     # Get current VIX value for volatility adjustments if available
     vix_value = None
@@ -66,6 +83,24 @@ def risk_management_agent(state: AgentState):
     # Update the risk management system with current portfolio value
     update_portfolio_value(total_portfolio_value)
 
+    # Get market index data (SPY) for market regime detection
+    progress.update_status("risk_management_agent", "SPY", "Getting market data for regime detection")
+    try:
+        spy_prices = get_prices(
+            ticker="SPY",
+            start_date=data["start_date"],
+            end_date=data["end_date"],
+        )
+        if spy_prices:
+            market_data = prices_to_df(spy_prices)
+            progress.update_status("risk_management_agent", "SPY", "Market data retrieved successfully")
+        else:
+            progress.update_status("risk_management_agent", "SPY", "Failed to get market data")
+    except Exception as e:
+        logger.warning(f"Failed to get market data: {e}")
+        progress.update_status("risk_management_agent", "SPY", "Error fetching market data")
+
+    # Get price data for all tickers
     for ticker in tickers:
         progress.update_status("risk_management_agent", ticker, "Analyzing price data")
 
@@ -80,13 +115,53 @@ def risk_management_agent(state: AgentState):
             continue
 
         prices_df = prices_to_df(prices)
+        prices_data[ticker] = prices_df
+        
+        # Store current price
+        current_price = prices_df["close"].iloc[-1]
+        current_prices[ticker] = current_price
+    
+    # Track sector exposure for the portfolio
+    progress.update_status("risk_management_agent", None, "Analyzing sector exposure")
+    sector_exposures = track_sector_exposure(portfolio)
+    over_exposed_sectors = check_sector_limits(sector_exposures, RISK_PARAMS["MAX_SECTOR_EXPOSURE_PCT"])
+    
+    # Check for correlation risks
+    progress.update_status("risk_management_agent", None, "Checking correlation risks")
+    correlation_risks = check_correlation_risk(portfolio)
+    
+    # Calculate portfolio beta
+    progress.update_status("risk_management_agent", None, "Calculating portfolio beta")
+    portfolio_beta = calculate_portfolio_beta(portfolio)
+    
+    # Assess portfolio liquidity
+    progress.update_status("risk_management_agent", None, "Assessing portfolio liquidity")
+    liquidity_risk = assess_portfolio_liquidity(portfolio)
+    
+    # Detect market regime
+    market_regime = {"regime": "Unknown", "risk_adjustment": 1.0}
+    if market_data is not None:
+        progress.update_status("risk_management_agent", None, "Detecting market regime")
+        market_regime = detect_market_regime(market_data)
+        logger.info(f"Current market regime: {market_regime['regime']} (risk adjustment: {market_regime['risk_adjustment']})")
+
+    # Generate comprehensive risk dashboard if we have all required data
+    if market_data is not None and len(prices_data) > 0:
+        progress.update_status("risk_management_agent", None, "Generating risk dashboard")
+        risk_dashboard = generate_risk_dashboard(portfolio, tickers, prices_data)
+    else:
+        risk_dashboard = None
+    
+    # Process each ticker to determine position limits
+    for ticker in tickers:
+        if ticker not in prices_data:
+            continue
 
         progress.update_status("risk_management_agent", ticker, "Calculating position limits")
-
-        # Calculate portfolio value
-        current_price = prices_df["close"].iloc[-1]
-        current_prices[ticker] = current_price  # Store the current price
-
+        
+        prices_df = prices_data[ticker]
+        current_price = current_prices[ticker]
+        
         # Calculate current position value for this ticker
         current_position = portfolio.get("positions", {}).get(ticker, {})
         long_position_value = current_position.get("long", 0) * current_position.get("long_cost_basis", 0)
@@ -101,10 +176,41 @@ def risk_management_agent(state: AgentState):
             total_portfolio_value
         )
 
-        # Apply volatility adjustment if needed
-        if is_high_volatility:
-            max_position_size *= volatility_adjustment
-            logger.info(f"Adjusting position size for {ticker} due to high volatility (VIX: {vix_value})")
+        # Apply all enhanced risk management techniques
+        if market_data is not None:
+            enhanced_risk = enhance_risk_management(
+                ticker=ticker,
+                position_limit=max_position_size,
+                portfolio=portfolio,
+                market_data=market_data,
+                prices_df=prices_df
+            )
+            
+            # Use the enhanced limit that includes all risk adjustments
+            max_position_size = enhanced_risk["enhanced_limit"]
+            logger.info(f"Enhanced position limit for {ticker}: ${max_position_size:.2f} (original: ${enhanced_risk['original_limit']:.2f})")
+            
+            # Check if trading should be halted based on drawdown
+            circuit_breaker_active = enhanced_risk.get("halt_trading", False) or TODAY_STATE.get("circuit_breaker_triggered", False)
+        else:
+            # Apply basic volatility adjustment if enhanced risk isn't available
+            if is_high_volatility:
+                max_position_size *= volatility_adjustment
+                logger.info(f"Adjusting position size for {ticker} due to high volatility (VIX: {vix_value})")
+                
+            circuit_breaker_active = TODAY_STATE.get("circuit_breaker_triggered", False)
+            
+            # Apply sector constraint if ticker is in over-exposed sector
+            ticker_sector = None
+            for sector in over_exposed_sectors:
+                if f"({ticker})" in sector:
+                    ticker_sector = sector.split(" ")[0]  # Extract sector name
+                    break
+                    
+            if ticker_sector:
+                # Reduce position size by 50% for over-exposed sectors
+                max_position_size *= 0.5
+                logger.info(f"Reducing position size for {ticker} by 50% due to over-exposed sector: {ticker_sector}")
 
         # For existing positions, subtract current position value from limit
         remaining_position_limit = max_position_size - current_position_value
@@ -115,18 +221,30 @@ def risk_management_agent(state: AgentState):
         # Calculate maximum shares based on current price
         max_shares = int(max_position_size / current_price) if current_price > 0 else 0
 
-        # Check if circuit breaker is active
-        circuit_breaker_active = TODAY_STATE.get("circuit_breaker_triggered", False)
+        # If circuit breaker is active, no new trades allowed
         if circuit_breaker_active:
             logger.warning(f"Circuit breaker active - no new trades allowed for {ticker}")
             max_position_size = 0
             max_shares = 0
+            
+        # Calculate position risk parameters for existing positions
+        position_risk_params = None
+        entry_price = current_position.get("long_cost_basis", 0) if current_position.get("long", 0) > 0 else current_position.get("short_cost_basis", 0)
+        if entry_price > 0 and current_price > 0:
+            position_risk_params = calculate_position_risk_parameters(
+                ticker, entry_price, current_price, prices_df
+            )
 
+        # Compile all risk information
         risk_analysis[ticker] = {
             "remaining_position_limit": float(max_position_size),
             "current_price": float(current_price),
             "max_shares": max_shares,
             "circuit_breaker_active": circuit_breaker_active,
+            "sector_exposure": {s: e for s, e in sector_exposures.items() if s != "Cash"},
+            "over_exposed_sectors": over_exposed_sectors,
+            "market_regime": market_regime.get("regime", "Unknown"),
+            "position_risk_params": position_risk_params,
             "reasoning": {
                 "portfolio_value": float(total_portfolio_value),
                 "current_position": float(current_position_value),
@@ -137,11 +255,27 @@ def risk_management_agent(state: AgentState):
                 "vix_value": vix_value,
                 "high_volatility": is_high_volatility,
                 "volatility_adjustment": volatility_adjustment if is_high_volatility else 1.0,
+                "portfolio_beta": portfolio_beta.get("portfolio_beta"),
+                "market_regime_risk_adjustment": market_regime.get("risk_adjustment", 1.0),
+                "liquidity_risk": liquidity_risk.get("portfolio_liquidity_risk", "Unknown"),
             },
         }
 
         progress.update_status("risk_management_agent", ticker, "Done")
 
+    # Add overall portfolio risk stats to the output
+    if len(risk_analysis) > 0:
+        risk_analysis["portfolio_stats"] = {
+            "sector_exposures": sector_exposures,
+            "over_exposed_sectors": over_exposed_sectors,
+            "correlation_risks": [f"{r['ticker1']} & {r['ticker2']} ({r['correlation']:.2f})" for r in correlation_risks],
+            "portfolio_beta": portfolio_beta.get("portfolio_beta"),
+            "market_regime": market_regime.get("regime"),
+            "liquidity_risk": liquidity_risk.get("portfolio_liquidity_risk"),
+            "circuit_breaker_active": TODAY_STATE.get("circuit_breaker_triggered", False),
+            "total_portfolio_value": total_portfolio_value
+        }
+    
     message = HumanMessage(
         content=json.dumps(risk_analysis),
         name="risk_management_agent",
