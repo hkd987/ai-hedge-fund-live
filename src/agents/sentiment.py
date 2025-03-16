@@ -4,11 +4,13 @@ from utils.progress import progress
 import pandas as pd
 import numpy as np
 import json
+from utils.caching import cached_analyst
 
 from tools.api import get_insider_trades, get_company_news
 
 
 ##### Sentiment Agent #####
+@cached_analyst()
 def sentiment_agent(state: AgentState):
     """Analyzes market sentiment and generates trading signals for multiple tickers."""
     data = state.get("data", {})

@@ -7,6 +7,8 @@ __pycache__/
 env/
 build/
 develop-eggs/
+src/cache/
+src/logs/
 dist/
 downloads/
 eggs/

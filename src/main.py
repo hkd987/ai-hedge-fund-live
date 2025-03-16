@@ -1,7 +1,9 @@
 import sys
 import os
 import time
+import signal
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
@@ -40,6 +42,9 @@ try:
 except ImportError:
     ALPACA_AVAILABLE = False
 
+# Import our new run cache module
+from utils.run_cache import should_use_cached_data, clear_cache, save_run_history
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -65,18 +70,62 @@ if LIVE_TRADING_ENABLED:
 
 
 def parse_hedge_fund_response(response):
-    """Parses a JSON string and returns a dictionary."""
+    """
+    Parses a JSON string and returns a dictionary with a consistent structure.
+    Ensures 'decisions' is properly formatted as a ticker-to-decision mapping.
+    """
+    logger = logging.getLogger('hedge_fund_parser')
+    
     try:
-        return json.loads(response)
+        # Parse the JSON string
+        parsed_data = json.loads(response)
+        
+        # Log the parsed data structure for debugging
+        logger.info(f"Parsed data type: {type(parsed_data)}")
+        if isinstance(parsed_data, dict):
+            logger.info(f"Parsed data keys: {list(parsed_data.keys())}")
+        
+        # Case 1: Already properly structured with 'decisions' key
+        if isinstance(parsed_data, dict) and 'decisions' in parsed_data:
+            decisions = parsed_data['decisions']
+            
+            # Check if decisions is a proper ticker-to-decision mapping
+            # or if it's a flattened decision object
+            if isinstance(decisions, dict):
+                # Check if it looks like a decision object instead of ticker mapping
+                if all(key in ["action", "quantity", "confidence", "reasoning"] for key in decisions.keys()):
+                    # It's a single decision without ticker - wrap it with a default ticker
+                    ticker = parsed_data.get("ticker", "UNKNOWN")
+                    parsed_data['decisions'] = {ticker: decisions}
+            return parsed_data
+            
+        # Case 2: Response is a dict that looks like a decision object
+        elif isinstance(parsed_data, dict) and any(key in ["action", "quantity", "confidence"] for key in parsed_data.keys()):
+            # It's a direct decision object, wrap it in the proper structure
+            ticker = "UNKNOWN"  # Default ticker if none is available
+            if 'ticker' in parsed_data:
+                ticker = parsed_data.pop('ticker')
+            return {'decisions': {ticker: parsed_data}}
+            
+        # Case 3: Response is already a ticker-to-decision mapping
+        elif isinstance(parsed_data, dict) and all(isinstance(v, dict) for v in parsed_data.values()):
+            # Wrap it in a decisions dictionary
+            return {'decisions': parsed_data}
+            
+        # Case 4: Any other structure - wrap in decisions
+        else:
+            logger.warning(f"Response structure not recognized, using generic wrapper: {type(parsed_data)}")
+            return {'decisions': parsed_data}
+            
     except json.JSONDecodeError as e:
-        print(f"JSON decoding error: {e}\nResponse: {repr(response)}")
-        return None
+        logger.error(f"JSON decoding error: {e}\nResponse: {repr(response)}")
+        return {'decisions': {}}
     except TypeError as e:
-        print(f"Invalid response type (expected string, got {type(response).__name__}): {e}")
-        return None
+        logger.error(f"Type error during parsing: {e}\nResponse: {repr(response)}")
+        return {'decisions': {}}
     except Exception as e:
-        print(f"Unexpected error while parsing response: {e}\nResponse: {repr(response)}")
-        return None
+        logger.error(f"Unexpected error parsing response: {e}\nResponse: {repr(response)}")
+        return {'decisions': {}}
 
 
 def get_alpaca_client():
@@ -415,6 +464,11 @@ def parse_args():
         help="Comma-separated list of analysts to use (e.g. warren_buffett,bill_ackman)",
     )
     parser.add_argument(
+        "--custom",
+        action="store_true",
+        help="Use custom analyst selection without prompting",
+    )
+    parser.add_argument(
         "--model",
         type=str,
         default="gpt-4o",
@@ -437,92 +491,53 @@ def parse_args():
         help="End date in YYYY-MM-DD format (default: today)",
     )
     parser.add_argument(
-        "--emergency-liquidate",
-        action="store_true",
-        help="Emergency liquidate all positions",
-    )
-    parser.add_argument(
-        "--include-alpaca-holdings",
-        action="store_true",
-        help="Include current holdings from Alpaca account",
-    )
-    parser.add_argument(
-        "--initial-cash",
-        type=float,
-        default=100000.0,
-        help="Initial cash in the portfolio (default: 100000.0)",
-    )
-    parser.add_argument(
-        "--margin-requirement",
-        type=float,
-        default=0.0,
-        help="Initial margin requirement (default: 0.0)",
-    )
-    parser.add_argument(
-        "--save-graph",
-        action="store_true",
-        help="Save the agent workflow graph as a PNG file",
-    )
-    parser.add_argument(
-        "--schedule",
-        "-s",
-        action="store_true",
-        help="Run the hedge fund every 60 minutes automatically",
-    )
-    parser.add_argument(
-        "--interval",
-        type=int,
-        default=60,
-        help="Interval in minutes between scheduled runs (default: 60)",
-    )
-    parser.add_argument(
-        "--check-interval",
-        type=int,
-        default=20,
-        help="Interval in minutes to check portfolio between full runs",
-    )
-    parser.add_argument(
         "--live",
         action="store_true",
-        help="Use live trading with Alpaca",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="Port for the API server",
-    )
-    parser.add_argument(
-        "--max-positions",
-        type=int,
-        default=3,
-        help="Maximum number of concurrent positions",
-    )
-    parser.add_argument(
-        "--api",
-        action="store_true",
-        help="Run the API server",
+        help="Use live trading mode",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run without making actual trades",
+        help="Don't execute actual trades in live mode",
     )
     parser.add_argument(
-        "--paper",
+        "--emergency-liquidate",
         action="store_true",
-        help="Run with paper trading",
+        help="Emergency liquidate all positions (live mode only)",
     )
     parser.add_argument(
-        "--backtest",
+        "--visualize",
         action="store_true",
-        help="Run in backtest mode",
+        help="Visualize the agent workflow as a graph",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode with additional logging",
+    )
+    parser.add_argument(
+        "--schedule", 
+        action="store_true",
+        help="Run the hedge fund at regular intervals"
+    )
+    parser.add_argument(
+        "--interval", 
+        type=int,
+        default=60,
+        help="Minutes between full analysis runs when using --schedule"
+    )
+    parser.add_argument(
+        "--check-interval", 
+        type=int,
+        default=15,
+        help="Minutes between portfolio checks when using --schedule"
+    )
+    parser.add_argument(
+        "--fresh-run",
+        action="store_true",
+        help="Force a fresh run (clear cache before running)",
+    )
+    
     return parser.parse_args()
 
 
@@ -601,7 +616,7 @@ def update_portfolio_status(alpaca_client, portfolio):
         return alpaca_client, portfolio
 
 
-def init_portfolio():
+def init_portfolio(args):
     """
     Initialize portfolio and Alpaca client for live trading.
     
@@ -668,166 +683,194 @@ def init_portfolio():
     return alpaca_client, portfolio
 
 
+# Initialize a global variable to track shutdown status
+is_shutting_down = False
+
+# Set up signal handlers for graceful shutdown
+def handle_shutdown_signal(signum, frame):
+    """
+    Handle shutdown signals (SIGINT, SIGTERM) gracefully.
+    This allows for a clean exit when Ctrl+C is pressed or the process is terminated.
+    """
+    global is_shutting_down
+    
+    # Mark as shutting down
+    is_shutting_down = True
+    
+    # Clear line and display message
+    print(f"\n{Fore.CYAN}Intercepted shutdown signal. Cleaning up...{Style.RESET_ALL}")
+    
+    # Make sure progress tracker is stopped
+    progress.stop()
+    
+    # Print shutdown message
+    print(f"\n{Fore.GREEN}AI Hedge Fund application gracefully shut down.{Style.RESET_ALL}")
+    
+    # Exit with success code
+    sys.exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGINT, handle_shutdown_signal)  # Ctrl+C
+signal.signal(signal.SIGTERM, handle_shutdown_signal) # Termination signal
+
+
 def main():
+    """Main entry point for the application."""
+    
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    
     args = parse_args()
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
     
-    # Handle emergency liquidation first if requested
+    # Check if user wants to use fresh data (ignore cache)
+    if args.fresh_run:
+        print("Fresh run requested - clearing cache")
+        clear_cache()
+    
+    # Load environment variables
+    load_dotenv()
+    
+    # Get the current date as the default end date
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    # Set default start and end dates
+    start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+    end_date = today
+    
+    # Check for emergency liquidation flag
     if args.emergency_liquidate:
-        confirmed = questionary.confirm("Are you sure you want to EMERGENCY LIQUIDATE ALL POSITIONS?").ask()
-        if confirmed:
-            success = emergency_liquidate_all_positions()
-            if success:
-                print(f"{Fore.GREEN}Emergency liquidation completed.{Style.RESET_ALL}")
-            else:
-                print(f"{Fore.RED}Emergency liquidation failed.{Style.RESET_ALL}")
+        emergency_liquidate_all_positions()
+        return
+        
+    # Get the ticker(s) from command line arguments
+    tickers = []
+    if args.ticker:
+        # Split multiple tickers if provided as comma-separated list
+        if "," in args.ticker:
+            tickers = [ticker.strip() for ticker in args.ticker.split(",")]
         else:
-            print(f"{Fore.YELLOW}Emergency liquidation cancelled.{Style.RESET_ALL}")
-        return
-
-    if not args.ticker:
-        print(f"{Fore.RED}No ticker provided. Use --ticker SYMBOL,SYMBOL2,... to specify tickers{Style.RESET_ALL}")
-        return
-
-    tickers = args.ticker.split(',')
+            tickers = [args.ticker]
     
-    # Select analysts if not specified in command line
+    # If no tickers provided, ask for ticker input
+    if not tickers:
+        ticker_input = questionary.text("Enter ticker symbol(s) (comma-separated for multiple):").ask()
+        if ticker_input:
+            tickers = [ticker.strip() for ticker in ticker_input.split(",")]
+        else:
+            print("No ticker provided. Exiting...")
+            return
+            
+    # Convert all tickers to uppercase
+    tickers = [ticker.upper() for ticker in tickers]
+    
+    # Ask if the user wants to select specific analysts
+    custom_analysts = args.selected_analysts
     selected_analysts = []
-    if args.selected_analysts:
-        selected_analysts = args.selected_analysts.split(',')
-    else:
-        print(f"{Fore.CYAN}Select analysts to include in the analysis (Space to select, Enter to confirm):{Style.RESET_ALL}")
-        choices = questionary.checkbox(
-            "Select analysts:",
-            choices=[questionary.Choice(display, value=value) for display, value in ANALYST_ORDER],
-            style=questionary.Style([
-                ("selected", "bg:blue fg:white"),
-                ("checkbox", "bg:blue fg:white"),
-            ]),
-        ).ask()
-        
-        if choices:
-            selected_analysts = choices
-            print(f"{Fore.GREEN}Selected analysts: {', '.join(selected_analysts)}{Style.RESET_ALL}")
+    
+    # Create mapping dictionaries for analyst names
+    display_name_to_key = {display_name: key for display_name, key in ANALYST_ORDER}
+    key_to_display_name = {key: display_name for display_name, key in ANALYST_ORDER}
+    
+    if custom_analysts:
+        # Handle comma-separated analyst names
+        if isinstance(custom_analysts, str) and "," in custom_analysts:
+            analyst_names = [name.strip() for name in custom_analysts.split(",")]
         else:
-            # If no analysts selected, use all
-            selected_analysts = [value for _, value in ANALYST_ORDER]
-            print(f"{Fore.YELLOW}No analysts selected, using all analysts.{Style.RESET_ALL}")
+            analyst_names = [custom_analysts]
+        
+        # Convert display names to agent keys
+        for name in analyst_names:
+            # Check if the name is a display name (like "Warren Buffett")
+            if name in display_name_to_key:
+                selected_analysts.append(display_name_to_key[name])
+            # Check if the name is a key (like "warren_buffett")
+            elif name in key_to_display_name:
+                selected_analysts.append(name)
+            else:
+                print(f"Warning: Analyst '{name}' not recognized. Skipping.")
+        
+        if not selected_analysts:
+            print("No valid analysts selected. Using all analysts.")
+    else:
+        # Ask if user wants to select specific analysts
+        use_custom = args.custom or questionary.confirm("Do you want to select specific analysts?").ask()
+        
+        if use_custom:
+            # Create checkbox options for analysts
+            analyst_options = [display_name for display_name, _ in ANALYST_ORDER]
+            selected_options = questionary.checkbox("Select analysts to use:", choices=analyst_options).ask()
+            
+            # Map selected display names to agent keys
+            for display_name in selected_options:
+                key = display_name_to_key.get(display_name)
+                if key:
+                    selected_analysts.append(key)
     
-    # Select model if not specified
-    model_name = args.model
-    model_provider = args.provider
+    # Initialize the portfolio
+    alpaca_client, portfolio = init_portfolio(args)
     
-    if args.api:
-        # ... existing API server code ...
+    # If live trading is enabled, get current holdings from Alpaca
+    if LIVE_TRADING_ENABLED:
+        print("Live trading is enabled. Checking Alpaca account...")
+        
+        # Get Alpaca holdings
+        alpaca_holdings = get_alpaca_holdings()
+        if alpaca_holdings:
+            # Initialize portfolio with Alpaca data
+            alpaca_portfolio = initialize_portfolio_from_alpaca(tickers)
+            if alpaca_portfolio:
+                portfolio = alpaca_portfolio
+                print(f"Initialized portfolio from Alpaca with ${portfolio.get('cash', 0):.2f} cash")
+            else:
+                print("Could not initialize portfolio from Alpaca. Using default portfolio.")
+    
+    # Get the model name and provider from arguments or environment
+    model_name = args.model or os.getenv("DEFAULT_MODEL", "gpt-4o")
+    model_provider = args.provider or os.getenv("DEFAULT_PROVIDER", "OpenAI")
+    
+    # Print configuration information
+    print(f"\nRunning hedge fund with the following configuration:")
+    print(f"  Tickers: {', '.join(tickers)}")
+    print(f"  Model: {model_name} ({model_provider})")
+    if selected_analysts:
+        print(f"  Selected analysts: {', '.join(selected_analysts)}")
+    else:
+        print(f"  Using all analysts")
+    print(f"  Start date: {start_date}")
+    print(f"  End date: {end_date}")
+    print(f"  Portfolio cash: ${portfolio.get('cash', 0):.2f}")
+    print()
+    
+    # Check market conditions
+    check_market_conditions()
+    
+    # Run the hedge fund
+    result = run_hedge_fund(
+        tickers=tickers,
+        start_date=start_date,
+        end_date=end_date,
+        portfolio=portfolio,
+        show_reasoning=args.show_reasoning,
+        selected_analysts=selected_analysts,
+        model_name=model_name,
+        model_provider=model_provider,
+        args=args,
+    )
+    
+    # Check for errors
+    if "error" in result:
+        print(f"Error running hedge fund: {result['error']}")
         return
     
-    # Initialize portfolio for live trading
-    if args.live:
-        alpaca, portfolio = init_portfolio()
-    else:
-        portfolio = {}
+    # Print the trading output
+    print_trading_output(result)
     
-    # Set default start and end dates if not provided
-    end_date = args.end_date
-    if not end_date:
-        end_date = datetime.now().strftime("%Y-%m-%d")
-    
-    start_date = args.start_date
-    if not start_date:
-        # Default to 3 months before end date
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-        start_date = (end_date_obj - timedelta(days=90)).strftime("%Y-%m-%d")
-    
-    # If schedule flag is set, run the hedge fund at regular intervals
-    if args.schedule:
-        logging.info(f"Starting scheduled hedge fund runs every {args.interval} minutes")
-        logging.info(f"Portfolio checks every {args.check_interval} minutes")
-        
-        try:
-            while True:
-                current_time = datetime.now()
-                logging.info(f"Running hedge fund analysis at {current_time}")
-                
-                # Update end date to current time for each run in scheduled mode
-                end_date = current_time.strftime("%Y-%m-%d")
-                
-                # Run the hedge fund with current settings
-                result = run_hedge_fund(
-                    tickers=tickers,
-                    start_date=start_date,
-                    end_date=end_date,
-                    portfolio=portfolio,
-                    show_reasoning=args.show_reasoning,
-                    selected_analysts=selected_analysts,
-                    model_name=model_name,
-                    model_provider=model_provider,
-                )
-                
-                # Print the trading output
-                print_trading_output(result)
-                
-                # Wait for the specified interval
-                logging.info(f"Next full analysis scheduled for {current_time + timedelta(minutes=args.interval)}")
-                
-                # Set up intermediate portfolio checks
-                check_count = args.interval // args.check_interval
-                
-                for i in range(check_count):
-                    try:
-                        # Sleep until next check
-                        time.sleep(args.check_interval * 60)
-                        
-                        if args.live and not args.dry_run:
-                            check_time = datetime.now()
-                            logging.info(f"Performing portfolio check at {check_time}")
-                            
-                            # Update portfolio status and check for any necessary adjustments
-                            # This is a lightweight check compared to the full analysis
-                            try:
-                                alpaca, portfolio = update_portfolio_status(alpaca, portfolio)
-                                # Optionally perform a quick analysis to see if any positions need adjustment
-                            except Exception as e:
-                                logging.error(f"Error during portfolio check: {e}")
-                    except KeyboardInterrupt:
-                        raise  # Re-raise to be caught by the outer try-except
-                
-                # If we didn't use all the time with checks, sleep for the remainder
-                remaining_time = args.interval - (check_count * args.check_interval)
-                if remaining_time > 0:
-                    time.sleep(remaining_time * 60)
-        except KeyboardInterrupt:
-            print(f"\n{Fore.CYAN}AI Hedge Fund application gracefully shut down.{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}All pending operations have been stopped safely.{Style.RESET_ALL}")
-            
-            # Perform any necessary cleanup here
-            if args.live and not args.dry_run:
-                print(f"{Fore.YELLOW}Note: Your current open positions remain active in your Alpaca account.{Style.RESET_ALL}")
-                print(f"{Fore.YELLOW}Run with --emergency-liquidate if you need to close all positions.{Style.RESET_ALL}")
-            
-            # Exit cleanly
-            return
-    else:
-        # Run once (original behavior)
-        try:
-            result = run_hedge_fund(
-                tickers=tickers,
-                start_date=start_date,
-                end_date=end_date,
-                portfolio=portfolio,
-                show_reasoning=args.show_reasoning,
-                selected_analysts=selected_analysts,
-                model_name=model_name,
-                model_provider=model_provider,
-            )
-            
-            # Print the trading output
-            print_trading_output(result)
-        except KeyboardInterrupt:
-            print(f"\n{Fore.CYAN}AI Hedge Fund application gracefully shut down.{Style.RESET_ALL}")
-            # Exit cleanly
-            return
+    # If live trading is enabled, update the portfolio status
+    if LIVE_TRADING_ENABLED:
+        alpaca_client = get_alpaca_client()
+        if alpaca_client:
+            update_portfolio_status(alpaca_client, portfolio)
 
 
 def run_hedge_fund(
@@ -839,65 +882,185 @@ def run_hedge_fund(
     selected_analysts: list[str] = [],
     model_name: str = "gpt-4o",
     model_provider: str = "OpenAI",
+    args = None,
 ):
-    # Start progress tracking
-    progress.start()
-
-    try:
-        # Create a new workflow if analysts are customized
-        if selected_analysts:
-            workflow = create_workflow(selected_analysts)
-            agent = workflow.compile()
+    # Add a timestamp for this run
+    run_timestamp = datetime.now()
+    
+    # Log the run start
+    logger.info(f"Starting hedge fund run at {run_timestamp.isoformat()} with tickers: {tickers}")
+    
+    # Save this run to the history
+    save_run_history(tickers, run_timestamp.isoformat())
+    
+    # Set up cache directory 
+    cache_dir = Path("src/cache")
+    if not cache_dir.exists():
+        logger.info(f"Creating cache directory: {cache_dir}")
+        cache_dir.mkdir(exist_ok=True)
+    
+    # Check for existing cache files
+    analysts_cache_dir = cache_dir / "analysts"
+    if not analysts_cache_dir.exists():
+        logger.info(f"Creating analysts cache directory: {analysts_cache_dir}")
+        analysts_cache_dir.mkdir(exist_ok=True)
+    else:
+        # List existing cache files
+        existing_cache = list(analysts_cache_dir.glob("*.json"))
+        if existing_cache:
+            logger.info(f"Found {len(existing_cache)} existing cache files:")
+            for cache_file in existing_cache:
+                logger.info(f"  - {cache_file.name}")
         else:
-            # Use the default compiled app
-            agent = app
-            
-        # Check market conditions if in live trading mode
-        if LIVE_TRADING_ENABLED:
-            market_conditions = check_market_conditions()
-            
-            # Add market conditions to the state data
-            portfolio["market_conditions"] = market_conditions
-
-        final_state = agent.invoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content="Make trading decisions based on the provided data.",
-                    )
-                ],
-                "data": {
-                    "tickers": tickers,
-                    "portfolio": portfolio,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "analyst_signals": {},
-                },
-                "metadata": {
-                    "show_reasoning": show_reasoning,
-                    "model_name": model_name,
-                    "model_provider": model_provider,
-                },
+            logger.info("No existing cache files found")
+    
+    # Check if we should use cached data
+    use_cached_data = should_use_cached_data(tickers)
+    logger.info(f"Using cached data: {use_cached_data}")
+    
+    # Always run these agents with fresh data
+    fresh_data_agents = ["risk_management_agent", "portfolio_management_agent"]
+    logger.info(f"These agents will always use fresh data: {fresh_data_agents}")
+    
+    # Log cached agents
+    if use_cached_data:
+        cached_agents = []
+        for cache_file in analysts_cache_dir.glob("*.json"):
+            parts = cache_file.stem.split('_')
+            if len(parts) > 0:
+                agent_name = parts[0]
+                if agent_name not in fresh_data_agents and agent_name not in cached_agents:
+                    cached_agents.append(agent_name)
+        
+        if cached_agents:
+            logger.info(f"These agents have cached data available: {cached_agents}")
+        else:
+            logger.info("No cached data available for any agents")
+    
+    # Initialize agents and workflow
+    try:
+        # Set up progress tracking
+        progress.start()
+        progress.update_status("Initializing", status="Setting up workflow")
+        
+        # Initialize portfolio with alpaca
+        if args is not None:
+            portfolio, alpaca_client = init_portfolio(args)
+        else:
+            # Create default portfolio if args not provided
+            alpaca_client = get_alpaca_client()
+            if not portfolio:
+                portfolio = {
+                    "cash": 10000.0,
+                    "portfolio_value": 10000.0,
+                    "positions": {},
+                    "realized_gains": {},
+                    "current_prices": {}
+                }
+        
+        # Load the AI Hedge Fund workflow with the analysts you selected
+        workflow = create_workflow(selected_analysts)
+        workflow = workflow.compile()
+        
+        progress.update_status("Running", status="Executing workflow")
+        
+        # Create initial state
+        state = {
+            "messages": [],
+            "data": {
+                "tickers": tickers,
+                "start_date": start_date,
+                "end_date": end_date,
+                "portfolio": portfolio,
+                "price_data": {},
+                "analyst_signals": {},
             },
-        )
-
-        return {
-            "decisions": parse_hedge_fund_response(final_state["messages"][-1].content),
-            "analyst_signals": final_state["data"]["analyst_signals"],
+            "metadata": {
+                "model_name": model_name,
+                "model_provider": model_provider,
+                "show_reasoning": show_reasoning,
+            }
         }
+        
+        # Execute the workflow for the selected tickers
+        result = workflow.invoke(state)
+        
+        progress.update_status("Finalizing", status="Processing results")
+        
+        # Extract data from result
+        data = result.get("data", {})
+        updated_portfolio = data.get("portfolio", portfolio)
+        
+        # Log the structure of the result to debug
+        logger.info(f"Result structure: {list(result.keys() if isinstance(result, dict) else [])}")
+        logger.info(f"Data structure: {list(data.keys() if isinstance(data, dict) else [])}")
+        
+        # Look for decisions in various possible locations
+        decisions = {}
+        
+        # Check for direct decisions in result
+        if isinstance(result, dict) and "decisions" in result:
+            decisions = result["decisions"]
+            logger.info("Found decisions directly in result")
+        
+        # Check if data contains portfolio_decisions
+        elif isinstance(data, dict) and "portfolio_decisions" in data:
+            decisions = data["portfolio_decisions"]
+            logger.info("Found decisions in data['portfolio_decisions']")
+        
+        # Check if analyst_signals contains portfolio_management_agent with decisions
+        elif isinstance(data, dict) and "analyst_signals" in data:
+            analyst_signals = data["analyst_signals"]
+            if isinstance(analyst_signals, dict) and "portfolio_management_agent" in analyst_signals:
+                pm_data = analyst_signals["portfolio_management_agent"]
+                if isinstance(pm_data, dict) and "decisions" in pm_data:
+                    decisions = pm_data["decisions"]
+                    logger.info("Found decisions in analyst_signals['portfolio_management_agent']['decisions']")
+        
+        # Create return data structure
+        final_result = {
+            "decisions": decisions,
+            "analyst_signals": data.get("analyst_signals", {}),
+            "portfolio": updated_portfolio,
+            "tickers": tickers,  # Add tickers to the result
+        }
+        
+        # Check if decisions is empty
+        if not decisions:
+            logger.warning(f"No trading decisions found in result. Creating default 'hold' decisions for {tickers}")
+            from agents.portfolio_manager import PortfolioDecision
+            
+            # Create default hold decisions for all tickers
+            decisions = {}
+            for ticker in tickers:
+                decisions[ticker] = PortfolioDecision(
+                    action="hold",
+                    quantity=0,
+                    confidence=50.0,
+                    reasoning=f"No valid trading decision was generated for {ticker}. Using hold as fallback."
+                )
+            final_result["decisions"] = decisions
+        
+        logger.info(f"Final decisions: {list(final_result['decisions'].keys() if isinstance(final_result['decisions'], dict) else [])}")
+        logger.info(f"Tickers in result: {final_result['tickers']}")
+        
+        progress.update_status("Complete", status="Run completed")
+        
+        return final_result
+    
     except KeyboardInterrupt:
-        # Make sure progress tracker is stopped before re-raising the exception
         progress.stop()
-        raise
+        logger.warning("Run interrupted by user")
+        return {"error": "Run interrupted by user"}
     except Exception as e:
-        # Log any errors and ensure progress tracker is stopped
-        logger.error(f"Error during hedge fund execution: {e}")
+        progress.update_status("Error", status=f"Error: {str(e)}")
         progress.stop()
-        raise
+        logger.error(f"Error running hedge fund: {e}", exc_info=True)
+        return {"error": str(e)}
     finally:
-        # Stop progress tracking in all cases
+        # Always stop progress tracking
         progress.stop()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

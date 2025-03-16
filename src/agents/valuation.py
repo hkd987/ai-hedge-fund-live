@@ -2,11 +2,13 @@ from langchain_core.messages import HumanMessage
 from graph.state import AgentState, show_agent_reasoning
 from utils.progress import progress
 import json
+from utils.caching import cached_analyst
 
 from tools.api import get_financial_metrics, get_market_cap, search_line_items
 
 
 ##### Valuation Agent #####
+@cached_analyst()
 def valuation_agent(state: AgentState):
     """Performs detailed valuation analysis using multiple methodologies for multiple tickers."""
     data = state["data"]

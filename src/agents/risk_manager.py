@@ -6,6 +6,7 @@ import json
 import os
 import logging
 import pandas as pd
+from utils.caching import cached_analyst
 
 # Import the basic risk management utility functions
 from utils.risk_manager import (
@@ -41,11 +42,39 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger('risk_manager_agent')
 
 ##### Risk Management Agent #####
+@cached_analyst()
 def risk_management_agent(state: AgentState):
     """Controls position sizing based on real-world risk factors for multiple tickers."""
-    portfolio = state["data"]["portfolio"]
-    data = state["data"]
-    tickers = data["tickers"]
+    # Ensure we're working with a dictionary, not the Alpaca client
+    # Extract portfolio from state data
+    if not isinstance(state, dict):
+        # If state is a class instance with a dict() method
+        if hasattr(state, 'dict') and callable(getattr(state, 'dict')):
+            state_dict = state.dict()
+        # If state is a class instance with a get() method
+        elif hasattr(state, 'get') and callable(getattr(state, 'get')):
+            state_dict = {'data': state.get('data', {})}
+        else:
+            # Last resort, try to extract data from state's attributes
+            state_dict = {'data': getattr(state, 'data', {})}
+    else:
+        state_dict = state
+    
+    # Now safely extract portfolio
+    data = state_dict.get('data', {})
+    portfolio = data.get('portfolio', {})
+    tickers = data.get('tickers', [])
+    
+    # Ensure portfolio is a dictionary
+    if not isinstance(portfolio, dict):
+        logger.error(f"Portfolio is not a dictionary: {type(portfolio)}")
+        # Create a default portfolio if we can't get a valid one
+        portfolio = {
+            "cash": 10000.0,
+            "portfolio_value": 10000.0,
+            "positions": {},
+            "realized_gains": {}
+        }
 
     # Initialize risk analysis for each ticker
     risk_analysis = {}
@@ -67,18 +96,27 @@ def risk_management_agent(state: AgentState):
     is_high_volatility, volatility_adjustment = should_adjust_for_volatility(vix_value)
 
     # Calculate total portfolio value
+    # Use safer access methods for the portfolio dictionary
     total_portfolio_value = portfolio.get("cash", 0)
-    for ticker in portfolio.get("positions", {}):
-        position = portfolio["positions"][ticker]
-        if "long" in position and position["long"] > 0:
-            # Add long position value
-            long_value = position["long"] * position.get("long_cost_basis", 0)
+    
+    # Safely access positions
+    positions = portfolio.get("positions", {})
+    for ticker in positions:
+        position = positions.get(ticker, {})
+        
+        # Safely get long position value
+        long_qty = position.get("long", 0)
+        if long_qty > 0:
+            long_cost_basis = position.get("long_cost_basis", 0)
+            long_value = long_qty * long_cost_basis
             total_portfolio_value += long_value
         
-        if "short" in position and position["short"] > 0:
-            # Add short position value (assuming we're tracking the value correctly)
-            short_value = position["short"] * position.get("short_cost_basis", 0)
-            total_portfolio_value += short_value
+        # Safely get short position value
+        short_qty = position.get("short", 0)
+        if short_qty > 0:
+            # For shorts, we add the margin (typically 50% of position value)
+            short_margin = position.get("short_margin_used", 0)
+            total_portfolio_value += short_margin
 
     # Update the risk management system with current portfolio value
     update_portfolio_value(total_portfolio_value)
@@ -235,6 +273,33 @@ def risk_management_agent(state: AgentState):
                 ticker, entry_price, current_price, prices_df
             )
 
+        # Calculate risk score from 0-100 (higher is better/less risky)
+        # Start with a base score of 75 (moderate risk)
+        risk_score = 75.0
+        
+        # Adjust score based on various risk factors
+        if circuit_breaker_active:
+            risk_score = 0.0  # Zero confidence if circuit breaker is active
+        else:
+            # Adjust for market regime
+            if market_regime["regime"] == "Bear":
+                risk_score -= 20
+            elif market_regime["regime"] == "Correction":
+                risk_score -= 10
+            elif market_regime["regime"] == "Bull":
+                risk_score += 10
+                
+            # Adjust for sector exposure
+            if ticker_sector:
+                risk_score -= 15  # Penalize for over-exposed sector
+                
+            # Adjust for volatility
+            if is_high_volatility:
+                risk_score -= 15
+                
+            # Ensure score is between 1 and 100 (never use 0 for valid signals)
+            risk_score = max(1.0, min(100.0, risk_score))
+
         # Compile all risk information
         risk_analysis[ticker] = {
             "remaining_position_limit": float(max_position_size),
@@ -245,7 +310,12 @@ def risk_management_agent(state: AgentState):
             "over_exposed_sectors": over_exposed_sectors,
             "market_regime": market_regime.get("regime", "Unknown"),
             "position_risk_params": position_risk_params,
-            "reasoning": {
+            "confidence": float(risk_score),  # Add explicit confidence score
+            "signal": "neutral",  # Risk manager always provides neutral signal
+            "reasoning": f"Risk assessment based on market regime ({market_regime.get('regime', 'Unknown')}), " +
+                       f"volatility ({is_high_volatility}), and sector exposure. " +
+                       f"Max shares allowed: {max_shares}, Position limit: ${max_position_size:.2f}",
+            "reasoning_detail": {
                 "portfolio_value": float(total_portfolio_value),
                 "current_position": float(current_position_value),
                 "max_position_size_pct": float(RISK_PARAMS["MAX_POSITION_SIZE_PCT"]),
@@ -275,6 +345,15 @@ def risk_management_agent(state: AgentState):
             "circuit_breaker_active": TODAY_STATE.get("circuit_breaker_triggered", False),
             "total_portfolio_value": total_portfolio_value
         }
+    
+    # Log the number of signals and their confidence scores
+    if tickers:
+        logger.info(f"Generated risk signals for {len([t for t in risk_analysis if t in tickers])} tickers")
+        for ticker in tickers:
+            if ticker in risk_analysis:
+                logger.info(f"Risk signal for {ticker}: confidence={risk_analysis[ticker].get('confidence', 0)}")
+            else:
+                logger.warning(f"No risk signal generated for {ticker}")
     
     message = HumanMessage(
         content=json.dumps(risk_analysis),
