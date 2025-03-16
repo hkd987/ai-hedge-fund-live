@@ -66,9 +66,17 @@ def call_llm(
     # Call the LLM with retries
     for attempt in range(max_retries):
         try:
+            # Update status to show we're making the LLM call
+            if agent_name:
+                progress.update_status(agent_name, None, f"Making LLM call ({attempt + 1}/{max_retries})")
+                
             # Call the LLM
             result = llm.invoke(prompt)
             
+            # Update status to show completion
+            if agent_name:
+                progress.update_status(agent_name, None, "LLM call completed")
+                
             # For non-JSON support models, we need to extract and parse the JSON manually
             if model_info and not model_info.has_json_mode():
                 parsed_result = extract_json_from_deepseek_response(result.content)

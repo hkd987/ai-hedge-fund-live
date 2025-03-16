@@ -55,7 +55,7 @@ def linda_raschke_agent(state: AgentState):
         
         # Get recent news for sentiment context
         progress.update_status("linda_raschke_agent", ticker, "Fetching news and context")
-        news = get_company_news(ticker=ticker)
+        news = get_company_news(ticker=ticker, end_date=end_date)
         
         # Get financial metrics for additional context
         progress.update_status("linda_raschke_agent", ticker, "Analyzing fundamentals")
