@@ -13,6 +13,7 @@ from agents.stanley_druckenmiller import stanley_druckenmiller_agent
 from agents.technicals import technical_analyst_agent
 from agents.valuation import valuation_agent
 from agents.warren_buffett import warren_buffett_agent
+from agents.linda_raschke import linda_raschke_agent
 
 # Define analyst configuration - single source of truth
 ANALYST_CONFIG = {
@@ -41,45 +42,50 @@ ANALYST_CONFIG = {
         "agent_func": jesse_livermore_agent,
         "order": 4,
     },
+    "linda_raschke": {
+        "display_name": "Linda Raschke",
+        "agent_func": linda_raschke_agent,
+        "order": 5,
+    },
     "mark_minervini": {
         "display_name": "Mark Minervini",
         "agent_func": mark_minervini_agent,
-        "order": 5,
+        "order": 6,
     },
     "paul_tudor_jones": {
         "display_name": "Paul Tudor Jones",
         "agent_func": paul_tudor_jones_agent,
-        "order": 6,
+        "order": 7,
     },
     "stanley_druckenmiller": {
         "display_name": "Stanley Druckenmiller",
         "agent_func": stanley_druckenmiller_agent,
-        "order": 7,
+        "order": 8,
     },
     "warren_buffett": {
         "display_name": "Warren Buffett",
         "agent_func": warren_buffett_agent,
-        "order": 8,
+        "order": 9,
     },
     "technical_analyst": {
         "display_name": "Technical Analyst",
         "agent_func": technical_analyst_agent,
-        "order": 9,
+        "order": 10,
     },
     "fundamentals_analyst": {
         "display_name": "Fundamentals Analyst",
         "agent_func": fundamentals_agent,
-        "order": 10,
+        "order": 11,
     },
     "sentiment_analyst": {
         "display_name": "Sentiment Analyst",
         "agent_func": sentiment_agent,
-        "order": 11,
+        "order": 12,
     },
     "valuation_analyst": {
         "display_name": "Valuation Analyst",
         "agent_func": valuation_agent,
-        "order": 12,
+        "order": 13,
     },
 }
 

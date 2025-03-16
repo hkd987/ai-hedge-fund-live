@@ -8,7 +8,7 @@ This system employs several agents working together:
 2. Bill Ackman Agent - An activist investors, takes bold positions and pushes for change
 3. Cathie Wood Agent - The queen of growth investing, believes in the power of innovation and disruption
 4. Charlie Munger Agent - Warren Buffett's partner, only buys wonderful businesses at fair prices
-5. Jesse Livermore Agent - Legendary speculative trader focused on price action, pivot points, and market momentum
+5. Linda Raschke Agent - Short-term technical trader known for her momentum and pattern-based strategies
 6. Mark Minervini Agent - Growth stock momentum trader known for his SEPA methodology and focus on breakouts
 7. Paul Tudor Jones Agent - Technical trading legend known for swing trades based on price action and momentum
 8. Stanley Druckenmiller Agent - Macro trading legend who hunts for asymmetric opportunities with explosive growth potential
