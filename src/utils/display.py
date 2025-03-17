@@ -3,6 +3,7 @@ from tabulate import tabulate
 from .analysts import ANALYST_ORDER
 import os
 import logging
+from datetime import datetime
 
 
 def sort_analyst_signals(signals):
@@ -58,144 +59,45 @@ def print_trading_output(result: dict) -> None:
                     confidence=decision['confidence'],
                     reasoning=decision.get('reasoning', "No reasoning provided")
                 )
-            else:
-                logging.warning(f"Unexpected decision format for {ticker}: {decision}")
+            
+    # Print current timestamp
+    timestamp = data.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}==================================================")
+    print(f"TRADING RECOMMENDATIONS ({timestamp})")
+    print(f"==================================================={Style.RESET_ALL}\n")
     
-    logging.info(f"Final decisions structure has keys: {list(final_decisions.keys())}")
-    logging.info(f"Expected tickers: {tickers}")
-    
-    for ticker in tickers:
-        print(f"\n{Fore.GREEN}{Style.BRIGHT}Analysis for {ticker}{Style.RESET_ALL}")
-        print(f"{Fore.WHITE}=================================================={Style.RESET_ALL}")
-        
-        # Display analyst signals for this ticker
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}ANALYST SIGNALS: [{ticker}]{Style.RESET_ALL}")
-        signals = []
-        
-        for analyst, output in analyst_signals.items():
-            if analyst == "portfolio_management_agent":
-                continue
-                
-            # Skip if the analyst doesn't have a signal for this ticker
-            if ticker not in output:
-                continue
-                
-            signal_output = output[ticker]
-            
-            # Determine display name
-            display_name = analyst.replace("_agent", "").replace("_", " ").title()
-            
-            # For William O'Neil's special signal format
-            if "signal" in signal_output and signal_output["signal"] in ["strong_buy", "buy", "weak_buy", "weak_sell", "sell", "strong_sell"]:
-                signal_value = signal_output["signal"].upper()
-            # For most standard signals
-            elif "signal" in signal_output:
-                signal_value = signal_output["signal"].upper()
-            # For some legacy formats
-            elif "trading_signal" in signal_output:
-                signal_value = signal_output["trading_signal"].upper()
-            else:
-                signal_value = "UNKNOWN"
-                
-            # Get confidence
-            confidence = signal_output.get("confidence", 0)
-            
-            signals.append((display_name, signal_value, confidence))
-            
-        # Sort signals by analyst name using predefined order
-        sorted_signals = sort_analyst_signals(signals)
-        
-        # Create the signals table
-        signals_table = []
-        for name, signal, confidence in sorted_signals:
-            # Format signal with color
-            if signal in ["BULLISH", "STRONG_BUY", "BUY"]:
-                signal_formatted = f"{Fore.GREEN}{signal}{Style.RESET_ALL}"
-            elif signal in ["BEARISH", "STRONG_SELL", "SELL"]:
-                signal_formatted = f"{Fore.RED}{signal}{Style.RESET_ALL}"
-            elif signal in ["WEAK_BUY"]:
-                signal_formatted = f"{Fore.CYAN}{signal}{Style.RESET_ALL}"
-            elif signal in ["WEAK_SELL"]:
-                signal_formatted = f"{Fore.MAGENTA}{signal}{Style.RESET_ALL}"
-            else:
-                signal_formatted = f"{Fore.YELLOW}{signal}{Style.RESET_ALL}"
-                
-            signals_table.append([name, signal_formatted, f"{confidence}%"])
-            
-        print(tabulate(
-            signals_table,
-            headers=["Analyst", "Signal", "Confidence"],
-            tablefmt="grid"
-        ))
-        
-        # Display trading decision for this ticker
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}TRADING DECISION: [{ticker}]{Style.RESET_ALL}")
-        
-        if ticker in final_decisions:
-            decision = final_decisions[ticker]
-            action = decision.action.upper()
-            
-            # Color code the action
-            if action in ["BUY", "COVER"]:
-                action_color = Fore.GREEN
-            elif action in ["SELL", "SHORT"]:
-                action_color = Fore.RED
-            else:
-                action_color = Fore.YELLOW
-                
-            # Format quantity
-            quantity = decision.quantity
-            
-            # Format confidence
-            confidence = decision.confidence
-            
-            decision_table = [
-                ["Action", f"{action_color}{action}{Style.RESET_ALL}"],
-                ["Quantity", quantity],
-                ["Confidence", f"{confidence}%"]
-            ]
-            
-            print(tabulate(decision_table, tablefmt="grid"))
-            
-            # Print reasoning if available
-            if hasattr(decision, 'reasoning') and decision.reasoning:
-                print(f"\n{Fore.WHITE}{Style.BRIGHT}REASONING:{Style.RESET_ALL}")
-                print(decision.reasoning)
-        else:
-            print(f"{Fore.YELLOW}No trading decision available for {ticker}{Style.RESET_ALL}")
-    
-    # Print portfolio summary if available
+    # Print portfolio structure for debugging
     if portfolio:
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}=================================================={Style.RESET_ALL}")
-        logging.info(f"Portfolio structure: {list(portfolio.keys())}")
+        portfolio_keys = list(portfolio.keys())
+        logging.info(f"Portfolio structure: {portfolio_keys}")
+    
+    # Print Portfolio Summary
+    print(f"{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY:{Style.RESET_ALL}")
+    if 'cash' in portfolio and 'portfolio_value' in portfolio:
+        cash = portfolio['cash']
+        portfolio_value = portfolio['portfolio_value']
+        position_value = portfolio_value - cash
         
-        # Portfolio Summary
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY:{Style.RESET_ALL}")
-        print(f"Cash Balance: ${portfolio.get('cash', 0):,.2f}")
-        
-        # Calculate total position value
-        total_position_value = 0
-        if 'positions' in portfolio:
-            for pos in portfolio['positions'].values():
-                if 'market_value' in pos:
-                    total_position_value += pos['market_value']
-                elif 'quantity' in pos and 'current_price' in pos:
-                    total_position_value += pos['quantity'] * pos['current_price']
-                    
-        print(f"Total Position Value: ${total_position_value:,.2f}")
-        print(f"Total Portfolio Value: ${portfolio.get('portfolio_value', 0):,.2f}")
-        
-        # Current Holdings
-        print(f"\n{Fore.WHITE}{Style.BRIGHT}CURRENT HOLDINGS:{Style.RESET_ALL}")
-        if 'positions' in portfolio and portfolio['positions']:
+        print(f"Cash Balance: ${cash:,.2f}")
+        print(f"Total Position Value: ${position_value:,.2f}")
+        print(f"Total Portfolio Value: ${portfolio_value:,.2f}\n")
+    else:
+        print(f"{Fore.YELLOW}Portfolio data not available{Style.RESET_ALL}\n")
+    
+    # Current Holdings
+    print(f"{Fore.WHITE}{Style.BRIGHT}CURRENT HOLDINGS:{Style.RESET_ALL}")
+    if 'positions' in portfolio:
+        positions = portfolio['positions']
+        if positions:
             holdings_table = []
-            for ticker, position in portfolio['positions'].items():
-                if 'quantity' in position and position['quantity'] != 0:
-                    qty = position['quantity']
-                    avg_price = position.get('avg_price', 0)
-                    current_price = position.get('current_price', 0)
-                    market_value = position.get('market_value', 0)
-                    unrealized_pl = position.get('unrealized_pl', 0)
+            
+            for ticker, pos in positions.items():
+                if isinstance(pos, dict):
+                    qty = pos.get('quantity', 0)
+                    avg_price = pos.get('avg_price', 0)
+                    current_price = pos.get('current_price', 0)
+                    market_value = pos.get('market_value', 0)
+                    unrealized_pl = pos.get('unrealized_pl', 0)
                     
                     # Calculate percent return
                     if qty != 0 and avg_price != 0:
@@ -235,7 +137,7 @@ def print_trading_output(result: dict) -> None:
                 order_count = sum(len(orders) for orders in open_orders.values())
                 logging.info(f"Total order count: {order_count}")
                 
-                if open_orders:
+                if open_orders and order_count > 0:  # Make sure orders exist and the count is > 0
                     orders_table = []
                     
                     for ticker, ticker_orders in open_orders.items():
@@ -277,7 +179,7 @@ def print_trading_output(result: dict) -> None:
                                 # Format price display
                                 if order_type and order_type.lower() == 'market':
                                     price_display = "Market"
-                                elif price:
+                                elif price is not None:
                                     price_display = f"${float(price):.2f}"
                                 else:
                                     price_display = "N/A"
@@ -287,8 +189,10 @@ def print_trading_output(result: dict) -> None:
                                 
                                 # Add row to table
                                 orders_table.append([ticker, side_display, qty, price_display])
+                                logging.info(f"Added order to table: {ticker}, {side_display}, {qty}, {price_display}")
                             except Exception as e:
                                 logging.error(f"Error processing order: {e}")
+                                logging.error(f"Order data: {order}")
                     
                     if orders_table:
                         print(tabulate(
@@ -297,21 +201,7 @@ def print_trading_output(result: dict) -> None:
                             tablefmt="simple"
                         ))
                     else:
-                        print(f"{Fore.YELLOW}No open orders{Style.RESET_ALL}")
-                        
-                        # Display diagnostics if available and no orders are shown
-                        if '_order_diagnostics' in portfolio:
-                            diagnostics = portfolio['_order_diagnostics']
-                            if diagnostics and 'order_count' in diagnostics and diagnostics['order_count'] > 0:
-                                print(f"\n{Fore.YELLOW}DIAGNOSTICS: Orders found but not displayed{Style.RESET_ALL}")
-                                print(f"Total orders detected: {diagnostics['order_count']}")
-                                if 'status_breakdown' in diagnostics:
-                                    print(f"Status breakdown: {diagnostics['status_breakdown']}")
-                                if 'aapl_orders' in diagnostics and diagnostics['aapl_orders'] > 0:
-                                    print(f"AAPL orders: {diagnostics['aapl_orders']} (check logs for details)")
-                                if 'voo_orders' in diagnostics and diagnostics['voo_orders'] > 0:
-                                    print(f"VOO orders: {diagnostics['voo_orders']} (check logs for details)")
-                                print(f"Environment: {diagnostics.get('environment', 'unknown')}")
+                        print(f"{Fore.YELLOW}No open orders displayed despite finding {order_count} orders{Style.RESET_ALL}")
                 else:
                     print(f"{Fore.YELLOW}No open orders{Style.RESET_ALL}")
                     
@@ -329,12 +219,187 @@ def print_trading_output(result: dict) -> None:
                                 print(f"VOO orders: {diagnostics['voo_orders']} (check logs for details)")
                             print(f"Environment: {diagnostics.get('environment', 'unknown')}")
             else:
-                print(f"{Fore.YELLOW}No open orders (unexpected format){Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}No open orders (unexpected format: {type(open_orders)}){Style.RESET_ALL}")
         else:
-            print(f"{Fore.YELLOW}No open orders information available{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}No open orders info in portfolio{Style.RESET_ALL}")
+            
+        # Display diagnostics even when open_orders is not in portfolio
+        if '_order_diagnostics' not in portfolio and '_order_diagnostics' in portfolio:
+            diagnostics = portfolio['_order_diagnostics']
+            if diagnostics and 'order_count' in diagnostics and diagnostics['order_count'] > 0:
+                print(f"\n{Fore.YELLOW}DIAGNOSTICS: Orders detected in account{Style.RESET_ALL}")
+                print(f"Total orders detected: {diagnostics['order_count']}")
+                if 'status_breakdown' in diagnostics:
+                    print(f"Status breakdown: {diagnostics['status_breakdown']}")
+                if 'aapl_orders' in diagnostics and diagnostics['aapl_orders'] > 0:
+                    print(f"AAPL orders: {diagnostics['aapl_orders']} (check logs for details)")
+                if 'voo_orders' in diagnostics and diagnostics['voo_orders'] > 0:
+                    print(f"VOO orders: {diagnostics['voo_orders']} (check logs for details)")
+                print(f"Environment: {diagnostics.get('environment', 'unknown')}")
+    
+    # Get signals by ticker
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}ANALYST SIGNALS:{Style.RESET_ALL}")
+    
+    # Create dict of ticker to analyst signals
+    signals_by_ticker = {}
+    for ticker in tickers:
+        signals_by_ticker[ticker] = []
+        
+    # Calculate counts for signals
+    for analyst, signals in analyst_signals.items():
+        display_name = analyst.replace("_agent", "").replace("_", " ").title()
+        
+        for ticker, signal_data in signals.items():
+            if ticker not in tickers:
+                continue  # Skip tickers not requested
+                
+            signal = None
+            confidence = None
+            
+            if hasattr(signal_data, "signal"):
+                signal = signal_data.signal
+                confidence = signal_data.confidence
+            elif isinstance(signal_data, dict) and "signal" in signal_data:
+                signal = signal_data["signal"]
+                confidence = signal_data.get("confidence", 50)  # Default confidence
+                
+            if signal:
+                signals_by_ticker[ticker].append((display_name, signal, confidence))
+                
+    # Print signals by ticker
+    for ticker in tickers:
+        print(f"\n{Fore.WHITE}{Style.BRIGHT}Analysis for {ticker}{Style.RESET_ALL}")
+        print(f"{Fore.WHITE}=================================================={Style.RESET_ALL}")
+        
+        # Display analyst signals for this ticker
+        print(f"\n{Fore.WHITE}{Style.BRIGHT}ANALYST SIGNALS: [{ticker}]{Style.RESET_ALL}")
+        
+        # Sort signals by name using predefined order
+        sorted_signals = sort_analyst_signals(signals_by_ticker.get(ticker, []))
+        
+        # Create the signals table
+        signals_table = []
+        for name, signal, confidence in sorted_signals:
+            # Format signal with color
+            signal_upper = signal.upper()
+            if signal_upper in ["BULLISH", "STRONG_BUY", "BUY"]:
+                signal_formatted = f"{Fore.GREEN}{signal_upper}{Style.RESET_ALL}"
+            elif signal_upper in ["BEARISH", "STRONG_SELL", "SELL"]:
+                signal_formatted = f"{Fore.RED}{signal_upper}{Style.RESET_ALL}"
+            elif signal_upper in ["WEAK_BUY"]:
+                signal_formatted = f"{Fore.CYAN}{signal_upper}{Style.RESET_ALL}"
+            elif signal_upper in ["WEAK_SELL"]:
+                signal_formatted = f"{Fore.MAGENTA}{signal_upper}{Style.RESET_ALL}"
+            else:
+                signal_formatted = f"{Fore.YELLOW}{signal_upper}{Style.RESET_ALL}"
+                
+            signals_table.append([name, signal_formatted, f"{confidence}%"])
+            
+        if signals_table:
+            print(tabulate(
+                signals_table,
+                headers=["Analyst", "Signal", "Confidence"],
+                tablefmt="grid"
+            ))
+        else:
+            print(f"{Fore.YELLOW}No analyst signals available for {ticker}{Style.RESET_ALL}")
+        
+        # Display trading decision for this ticker
+        print(f"\n{Fore.WHITE}{Style.BRIGHT}TRADING DECISION: [{ticker}]{Style.RESET_ALL}")
+        
+        if ticker in final_decisions:
+            decision = final_decisions[ticker]
+            action = decision.action.upper()
+            
+            # Color code the action
+            if action in ["BUY", "COVER"]:
+                action_color = Fore.GREEN
+            elif action in ["SELL", "SHORT"]:
+                action_color = Fore.RED
+            else:
+                action_color = Fore.YELLOW
+                
+            # Format quantity
+            quantity = decision.quantity
+            
+            # Format confidence
+            confidence = decision.confidence
+            
+            decision_table = [
+                ["Action", f"{action_color}{action}{Style.RESET_ALL}"],
+                ["Quantity", quantity],
+                ["Confidence", f"{confidence}%"]
+            ]
+            
+            print(tabulate(decision_table, tablefmt="grid"))
+            
+            # Print reasoning if available
+            if hasattr(decision, 'reasoning') and decision.reasoning:
+                print(f"\n{Fore.WHITE}{Style.BRIGHT}REASONING:{Style.RESET_ALL}")
+                print(decision.reasoning)
+        else:
+            print(f"{Fore.YELLOW}No trading decision available for {ticker}{Style.RESET_ALL}")
     
     print(f"\n{Fore.WHITE}{Style.BRIGHT}=================================================={Style.RESET_ALL}")
-    print(f"{Fore.GREEN}Analysis complete.{Style.RESET_ALL}")
+    
+    # Add overview of all decisions at the end
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}TRADING DECISIONS OVERVIEW:{Style.RESET_ALL}")
+    if final_decisions:
+        overview_table = []
+        for ticker in tickers:
+            if ticker in final_decisions:
+                decision = final_decisions[ticker]
+                action = decision.action.upper()
+                
+                # Color code the action
+                if action in ["BUY", "COVER"]:
+                    action_color = Fore.GREEN
+                elif action in ["SELL", "SHORT"]:
+                    action_color = Fore.RED
+                else:
+                    action_color = Fore.YELLOW
+                    
+                # Format row for overview table
+                overview_table.append([
+                    ticker,
+                    f"{action_color}{action}{Style.RESET_ALL}",
+                    decision.quantity,
+                    f"{decision.confidence}%"
+                ])
+        
+        if overview_table:
+            print(tabulate(
+                overview_table,
+                headers=["Ticker", "Action", "Quantity", "Confidence"],
+                tablefmt="simple"
+            ))
+        else:
+            print(f"{Fore.YELLOW}No trading decisions available{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}No trading decisions available{Style.RESET_ALL}")
+    
+    # Count signals by type across all tickers
+    bullish_count = 0
+    bearish_count = 0
+    neutral_count = 0
+    
+    for ticker, signals in signals_by_ticker.items():
+        for _, signal, _ in signals:
+            signal_upper = signal.upper()
+            if signal_upper in ["BULLISH", "STRONG_BUY", "BUY", "WEAK_BUY"]:
+                bullish_count += 1
+            elif signal_upper in ["BEARISH", "STRONG_SELL", "SELL", "WEAK_SELL"]:
+                bearish_count += 1
+            else:
+                neutral_count += 1
+    
+    # Print signal summary
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}SIGNAL SUMMARY:{Style.RESET_ALL}")
+    print(f"Bullish Signals: {Fore.GREEN}{bullish_count}{Style.RESET_ALL}")
+    print(f"Bearish Signals: {Fore.RED}{bearish_count}{Style.RESET_ALL}")
+    print(f"Neutral Signals: {Fore.YELLOW}{neutral_count}{Style.RESET_ALL}")
+    
+    print(f"\n{Fore.GREEN}Analysis complete.{Style.RESET_ALL}")
 
 
 def print_backtest_results(table_rows: list) -> None:
