@@ -116,7 +116,15 @@ def linda_raschke_agent(state: AgentState):
         show_agent_reasoning({ticker: signal.model_dump() for ticker, signal in signals.items()}, "Linda Raschke Agent")
 
     # Add the signal to the analyst_signals list
-    state["data"]["analyst_signals"]["linda_raschke_agent"] = signals
+    # Ensure we're storing the signals as proper dictionaries, not objects
+    proper_signals = {}
+    for ticker, signal in signals.items():
+        proper_signals[ticker] = {
+            "signal": signal.signal,
+            "confidence": float(signal.confidence),
+            "reasoning": signal.reasoning
+        }
+    state["data"]["analyst_signals"]["linda_raschke_agent"] = proper_signals
 
     return {
         "messages": state["messages"] + [message],

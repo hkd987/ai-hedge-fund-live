@@ -4,6 +4,7 @@ import time
 import signal
 from datetime import datetime, timedelta
 from pathlib import Path
+import copy
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
@@ -196,106 +197,94 @@ def get_alpaca_holdings():
 
 def initialize_portfolio_from_alpaca(tickers):
     """
-    Initialize the portfolio with data from Alpaca in live trading mode.
-    This ensures we start with actual cash balances and margin requirements.
+    Initialize portfolio from Alpaca for live trading.
+    
+    Args:
+        tickers: List of ticker symbols
+        
+    Returns:
+        Portfolio dictionary with Alpaca data
     """
-    if not LIVE_TRADING_ENABLED or not ALPACA_AVAILABLE:
-        logger.info("Not using Alpaca for portfolio initialization (either live trading is disabled or Alpaca SDK not available)")
-        return None
+    alpaca_client = get_alpaca_client()
     
-    client = get_alpaca_client()
-    if not client:
-        logger.warning("Could not initialize Alpaca client for portfolio initialization")
-        return None
-    
+    if not alpaca_client:
+        # Create default portfolio
+        portfolio = {
+            "cash": 100000.0,
+            "portfolio_value": 100000.0,
+            "positions": {},
+            "realized_gains": 0.0,
+            "current_prices": {},
+            "open_orders": {}  # Initialize empty open orders dict
+        }
+        return portfolio
+        
     try:
         # Get account information
-        account = client.get_account()
+        account = alpaca_client.get_account()
         
-        # Initialize portfolio structure
+        # Create initial portfolio structure
         portfolio = {
             "cash": float(account.cash),
+            "portfolio_value": float(account.equity),
             "positions": {},
-            "margin_requirement": 0.0,  # We'll calculate this based on positions
-            "realized_gains": {}
+            "realized_gains": 0.0,
+            "current_prices": {},
+            "open_orders": {}  # Initialize empty open orders dict
         }
         
-        logger.info(f"Initialized portfolio with ${portfolio['cash']:.2f} cash from Alpaca account")
-        
-        # Get all positions
-        all_positions = {}
+        # Get all positions and add to portfolio
         try:
-            positions = client.get_all_positions()
+            positions = alpaca_client.get_all_positions()
             for position in positions:
-                all_positions[position.symbol] = position
-        except Exception as e:
-            logger.warning(f"Failed to get positions from Alpaca: {e}")
-        
-        # Organize positions by ticker
-        for ticker in tickers:
-            position = all_positions.get(ticker)
-            portfolio["realized_gains"][ticker] = {
-                "long": 0.0,
-                "short": 0.0,
-            }
-            
-            if position:
-                qty = int(position.qty)
+                symbol = position.symbol
+                qty = float(position.qty)
+                avg_entry_price = float(position.avg_entry_price)
+                current_price = float(position.current_price)
                 market_value = float(position.market_value)
-                cost_basis = float(position.cost_basis)
+                unrealized_pl = float(position.unrealized_pl)
                 
-                # Determine if long or short position
-                if qty > 0:  # Long position
-                    portfolio["positions"][ticker] = {
-                        "long": qty,
-                        "short": 0,
-                        "long_cost_basis": cost_basis / qty if qty > 0 else 0.0,
-                        "short_cost_basis": 0.0,
-                        "short_margin_used": 0.0
-                    }
-                    logger.info(f"Found long position for {ticker}: {qty} shares at ${cost_basis / qty:.2f} cost basis")
-                elif qty < 0:  # Short position
-                    # For shorts, qty is negative
-                    short_qty = abs(qty)
-                    # Estimate margin requirement at 50% of position value
-                    margin_used = market_value * 0.5
-                    
-                    portfolio["positions"][ticker] = {
-                        "long": 0,
-                        "short": short_qty,
-                        "long_cost_basis": 0.0,
-                        "short_cost_basis": cost_basis / short_qty if short_qty > 0 else 0.0,
-                        "short_margin_used": margin_used
-                    }
-                    
-                    # Add to total margin requirement
-                    portfolio["margin_requirement"] += margin_used
-                    logger.info(f"Found short position for {ticker}: {short_qty} shares at ${cost_basis / short_qty:.2f} cost basis")
-            else:
-                # No position for this ticker
-                portfolio["positions"][ticker] = {
-                    "long": 0,
-                    "short": 0,
-                    "long_cost_basis": 0.0,
-                    "short_cost_basis": 0.0,
-                    "short_margin_used": 0.0
+                portfolio["positions"][symbol] = {
+                    "quantity": qty,
+                    "avg_price": avg_entry_price,
+                    "current_price": current_price,
+                    "market_value": market_value,
+                    "unrealized_pl": unrealized_pl
                 }
-        
-        # Calculate total portfolio value including both long and short positions
-        portfolio_value = float(account.equity)
-        
-        # Initialize risk management with portfolio value
-        from utils.risk_manager import reset_daily_state
-        reset_daily_state(portfolio_value)
-        
-        logger.info(f"Successfully initialized portfolio from Alpaca with total value: ${portfolio_value:.2f}")
-        logger.info(f"Using margin requirement: ${portfolio['margin_requirement']:.2f}")
-        
+                
+                # Also add to current prices
+                portfolio["current_prices"][symbol] = current_price
+        except Exception as e:
+            logging.error(f"Error getting positions from Alpaca: {e}")
+            
+        # Get open orders and add to portfolio
+        from agents.portfolio_manager import get_alpaca_open_orders
+        try:
+            open_orders = get_alpaca_open_orders(alpaca_client)
+            portfolio["open_orders"] = open_orders
+            if open_orders:
+                ticker_list = list(open_orders.keys())
+                order_count = sum(len(orders) for orders in open_orders.values())
+                logging.info(f"Added {order_count} open orders for {len(ticker_list)} tickers to initial portfolio")
+        except Exception as e:
+            logging.error(f"Error getting open orders for portfolio initialization: {e}")
+            portfolio["open_orders"] = {}
+            
+        logging.info(f"Initialized portfolio from Alpaca: ${portfolio['portfolio_value']:,.2f} total value, ${portfolio['cash']:,.2f} cash")
         return portfolio
-    
+        
     except Exception as e:
-        logger.error(f"Failed to initialize portfolio from Alpaca: {e}")
-        return None
+        logging.error(f"Error initializing portfolio from Alpaca: {e}")
+        # Fall back to default portfolio
+        portfolio = {
+            "cash": 100000.0,
+            "portfolio_value": 100000.0,
+            "positions": {},
+            "realized_gains": 0.0,
+            "current_prices": {},
+            "open_orders": {}  # Initialize empty open orders dict
+        }
+        return portfolio
 
 
 def emergency_liquidate_all_positions():
@@ -543,144 +532,174 @@ def parse_args():
 
 def update_portfolio_status(alpaca_client, portfolio):
     """
-    Update portfolio status between full analysis runs.
-    Gets latest position information and prices from Alpaca.
+    Update the portfolio status with the latest data from Alpaca
     
     Args:
-        alpaca_client: Initialized Alpaca client
-        portfolio: Current portfolio state
+        alpaca_client: Alpaca client
+        portfolio: Portfolio dictionary
         
     Returns:
-        tuple: (alpaca_client, updated_portfolio)
+        Updated portfolio dictionary
     """
     if not alpaca_client:
-        logging.warning("No Alpaca client available. Cannot update portfolio status.")
-        return alpaca_client, portfolio
-    
+        logging.warning("No Alpaca client available for updating portfolio status")
+        return portfolio
+        
     try:
-        # Get account information for cash balance
+        # Get account data
         account = alpaca_client.get_account()
+        portfolio["portfolio_value"] = float(account.equity)
         portfolio["cash"] = float(account.cash)
         
-        # Get all current positions
-        positions = alpaca_client.get_all_positions()
-        current_positions = {position.symbol: position for position in positions}
+        # Get current positions
+        try:
+            positions = alpaca_client.get_all_positions()
+            if positions:
+                for position in positions:
+                    symbol = position.symbol
+                    qty = float(position.qty)
+                    avg_entry_price = float(position.avg_entry_price)
+                    current_price = float(position.current_price)
+                    market_value = float(position.market_value)
+                    unrealized_pl = float(position.unrealized_pl)
+                    
+                    if symbol not in portfolio["positions"]:
+                        portfolio["positions"][symbol] = {
+                            "quantity": 0,
+                            "avg_price": 0,
+                            "current_price": 0,
+                            "market_value": 0,
+                            "unrealized_pl": 0
+                        }
+                    
+                    # Update position data
+                    portfolio["positions"][symbol]["quantity"] = qty
+                    portfolio["positions"][symbol]["avg_price"] = avg_entry_price
+                    portfolio["positions"][symbol]["current_price"] = current_price
+                    portfolio["positions"][symbol]["market_value"] = market_value
+                    portfolio["positions"][symbol]["unrealized_pl"] = unrealized_pl
+                    
+                    # Also update current price in the global price dict
+                    portfolio["current_prices"][symbol] = current_price
+        except Exception as e:
+            logging.error(f"Error getting positions: {e}")
+            
+        # Get all open orders and include them in the portfolio
+        logging.info("Attempting to retrieve open orders in update_portfolio_status")
         
-        # Update position data for each ticker in the portfolio
-        for ticker in portfolio["positions"]:
-            if ticker in current_positions:
-                position = current_positions[ticker]
-                qty = int(position.qty)
-                
-                # Update position details based on current data
-                if qty > 0:  # Long position
-                    portfolio["positions"][ticker]["long"] = qty
-                    portfolio["positions"][ticker]["long_cost_basis"] = float(position.cost_basis) / qty
-                    portfolio["positions"][ticker]["short"] = 0
-                    portfolio["positions"][ticker]["short_cost_basis"] = 0.0
-                elif qty < 0:  # Short position
-                    short_qty = abs(qty)
-                    portfolio["positions"][ticker]["short"] = short_qty
-                    portfolio["positions"][ticker]["short_cost_basis"] = float(position.cost_basis) / short_qty
-                    portfolio["positions"][ticker]["long"] = 0
-                    portfolio["positions"][ticker]["long_cost_basis"] = 0.0
-                    # Update margin used
-                    portfolio["positions"][ticker]["short_margin_used"] = float(position.market_value) * 0.5
+        # Run diagnostics first to provide complete information
+        from agents.portfolio_manager import diagnose_alpaca_orders
+        diagnostics = diagnose_alpaca_orders(alpaca_client)
+        portfolio["_order_diagnostics"] = diagnostics
+        
+        # Then get the actual open orders using the fixed function
+        from agents.portfolio_manager import get_alpaca_open_orders
+        try:
+            open_orders = get_alpaca_open_orders(alpaca_client)
+            portfolio["open_orders"] = open_orders
+            if open_orders:
+                ticker_list = list(open_orders.keys())
+                order_count = sum(len(orders) for orders in open_orders.values())
+                logging.info(f"Added {order_count} open orders for {len(ticker_list)} tickers to portfolio")
             else:
-                # No current position for this ticker
-                portfolio["positions"][ticker]["long"] = 0
-                portfolio["positions"][ticker]["short"] = 0
+                logging.info("No open orders returned from Alpaca (empty dictionary)")
+        except Exception as e:
+            logging.error(f"Error getting open orders: {e}")
+            portfolio["open_orders"] = {}
+            
+        # Calculate total position value
+        position_value = sum(pos["market_value"] for pos in portfolio["positions"].values())
+        logging.info(f"Portfolio updated: ${portfolio['portfolio_value']:.2f} total value, ${portfolio['cash']:.2f} cash")
         
-        # Calculate total portfolio value and update
-        portfolio_value = float(account.equity)
-        portfolio["portfolio_value"] = portfolio_value
-        
-        # Calculate current prices for all tickers in the portfolio
-        current_prices = {}
-        for ticker in portfolio["positions"]:
-            # Try to get current price from existing position
-            if ticker in current_positions:
-                position = current_positions[ticker]
-                qty = abs(int(position.qty))
-                if qty > 0:
-                    current_prices[ticker] = float(position.market_value) / qty
-        
-        # Store current prices in the portfolio
-        portfolio["current_prices"] = current_prices
-        
-        logging.info(f"Portfolio updated: ${portfolio_value:.2f} total value, ${portfolio['cash']:.2f} cash")
-        return alpaca_client, portfolio
+        return portfolio
         
     except Exception as e:
-        logging.error(f"Error updating portfolio status: {e}")
-        return alpaca_client, portfolio
+        logging.error(f"Error updating portfolio: {e}")
+        return portfolio
 
 
 def init_portfolio(args):
     """
-    Initialize portfolio and Alpaca client for live trading.
+    Initialize the portfolio with cash or restore from saved state.
     
+    Args:
+        args: Command line arguments
+        
     Returns:
-        tuple: (alpaca_client, portfolio)
+        Portfolio dictionary with initial state
     """
+    # Check if we have Alpaca credentials for live trading
     alpaca_client = get_alpaca_client()
-    portfolio = {}
     
+    # Initialize portfolio
     if alpaca_client:
         try:
-            # Get account info
+            # Get account information
             account = alpaca_client.get_account()
             
-            # Initialize basic portfolio structure
+            # Create initial portfolio structure
             portfolio = {
                 "cash": float(account.cash),
                 "portfolio_value": float(account.equity),
                 "positions": {},
-                "realized_gains": {},
-                "current_prices": {}
+                "realized_gains": 0.0,
+                "current_prices": {},
+                "open_orders": {}  # Initialize empty open orders dict
             }
             
-            # Get all positions
+            # Get all positions and add to portfolio
             positions = alpaca_client.get_all_positions()
-            
-            # Initialize empty positions and realized gains for all positions
             for position in positions:
-                ticker = position.symbol
-                portfolio["positions"][ticker] = {
-                    "long": 0,
-                    "short": 0,
-                    "long_cost_basis": 0.0,
-                    "short_cost_basis": 0.0,
-                    "short_margin_used": 0.0
+                symbol = position.symbol
+                qty = float(position.qty)
+                avg_entry_price = float(position.avg_entry_price)
+                current_price = float(position.current_price)
+                market_value = float(position.market_value)
+                unrealized_pl = float(position.unrealized_pl)
+                
+                portfolio["positions"][symbol] = {
+                    "quantity": qty,
+                    "avg_price": avg_entry_price,
+                    "current_price": current_price,
+                    "market_value": market_value,
+                    "unrealized_pl": unrealized_pl
                 }
-                portfolio["realized_gains"][ticker] = {
-                    "long": 0.0,
-                    "short": 0.0
-                }
-            
-            # Update with actual position data
-            alpaca_client, portfolio = update_portfolio_status(alpaca_client, portfolio)
+                
+                # Also add to current prices
+                portfolio["current_prices"][symbol] = current_price
+                
+            # Get open orders and add to portfolio
+            from agents.portfolio_manager import get_alpaca_open_orders
+            try:
+                open_orders = get_alpaca_open_orders(alpaca_client)
+                portfolio["open_orders"] = open_orders
+                if open_orders:
+                    ticker_list = list(open_orders.keys())
+                    order_count = sum(len(orders) for orders in open_orders.values())
+                    logging.info(f"Added {order_count} open orders for {len(ticker_list)} tickers to initial portfolio")
+            except Exception as e:
+                logging.error(f"Error getting open orders for portfolio initialization: {e}")
+                portfolio["open_orders"] = {}
+                
+            logging.info(f"Initialized portfolio from Alpaca: ${portfolio['portfolio_value']:,.2f} total value, ${portfolio['cash']:,.2f} cash")
+            return portfolio
             
         except Exception as e:
-            logging.error(f"Error initializing portfolio: {e}")
-            portfolio = {
-                "cash": 10000.0,  # Default cash value
-                "portfolio_value": 10000.0,
-                "positions": {},
-                "realized_gains": {},
-                "current_prices": {}
-            }
-    else:
-        # No Alpaca client, use default portfolio
-        portfolio = {
-            "cash": 10000.0,
-            "portfolio_value": 10000.0,
-            "positions": {},
-            "realized_gains": {},
-            "current_prices": {}
-        }
+            logging.error(f"Error initializing portfolio from Alpaca: {e}")
+            # Fall back to default portfolio
+            
+    # Default portfolio if Alpaca is not available
+    portfolio = {
+        "cash": args.initial_capital if args else 100000.0,
+        "portfolio_value": args.initial_capital if args else 100000.0,
+        "positions": {},
+        "realized_gains": 0.0,
+        "current_prices": {},
+        "open_orders": {}  # Initialize empty open orders dict
+    }
     
-    return alpaca_client, portfolio
+    logging.info(f"Initialized default portfolio: ${portfolio['portfolio_value']:,.2f}")
+    return portfolio
 
 
 # Initialize a global variable to track shutdown status
@@ -808,7 +827,7 @@ def main():
                     selected_analysts.append(key)
     
     # Initialize the portfolio
-    alpaca_client, portfolio = init_portfolio(args)
+    portfolio = init_portfolio(args)
     
     # If live trading is enabled, get current holdings from Alpaca
     if LIVE_TRADING_ENABLED:
@@ -818,7 +837,7 @@ def main():
         alpaca_holdings = get_alpaca_holdings()
         if alpaca_holdings:
             # Initialize portfolio with Alpaca data
-            alpaca_portfolio = initialize_portfolio_from_alpaca(tickers)
+            alpaca_portfolio, alpaca_client = initialize_portfolio_from_alpaca(tickers)
             if alpaca_portfolio:
                 portfolio = alpaca_portfolio
                 print(f"Initialized portfolio from Alpaca with ${portfolio.get('cash', 0):.2f} cash")
@@ -862,6 +881,40 @@ def main():
         # Track last run times
         last_full_run = datetime.now()
         last_check = datetime.now()
+        
+        # Perform the initial full run before entering the waiting loop
+        print(f"\n{Fore.GREEN}Performing initial full analysis at {last_full_run.strftime('%Y-%m-%d %H:%M:%S')}{Style.RESET_ALL}")
+        
+        # Run full analysis
+        result = run_hedge_fund(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            portfolio=portfolio,
+            show_reasoning=args.show_reasoning,
+            selected_analysts=selected_analysts,
+            model_name=model_name,
+            model_provider=model_provider,
+            args=args,
+        )
+        
+        # Check for errors
+        if "error" in result:
+            print(f"Error running hedge fund: {result['error']}")
+        else:
+            # Print the trading output
+            print_trading_output(result)
+            
+            # Update portfolio
+            if LIVE_TRADING_ENABLED:
+                alpaca_client, portfolio = update_portfolio_status(alpaca_client, portfolio)
+        
+        # Update last full run time after initial run
+        last_full_run = datetime.now()
+        last_check = datetime.now()
+        
+        print(f"\n{Fore.CYAN}Initial run complete. Entering scheduled mode.{Style.RESET_ALL}")
+        print(f"Next full run will be in {args.interval} minutes")
         
         # Run until interrupted
         try:
@@ -971,7 +1024,7 @@ def main():
         if LIVE_TRADING_ENABLED:
             alpaca_client = get_alpaca_client()
             if alpaca_client:
-                update_portfolio_status(alpaca_client, portfolio)
+                alpaca_client, portfolio = update_portfolio_status(alpaca_client, portfolio)
 
 
 def run_hedge_fund(
@@ -985,182 +1038,64 @@ def run_hedge_fund(
     model_provider: str = "OpenAI",
     args = None,
 ):
+    """
+    Run the hedge fund for the given tickers and dates.
+    
+    Args:
+        tickers: List of ticker symbols
+        start_date: Start date for the analysis
+        end_date: End date for the analysis
+        portfolio: Portfolio dictionary
+        show_reasoning: Whether to show detailed reasoning from analysts
+        selected_analysts: List of analysts to include
+        model_name: Name of the LLM model to use
+        model_provider: Provider of the LLM model
+        args: Command line arguments
+        
+    Returns:
+        Result dictionary containing decisions and analyst signals
+    """
     # Add a timestamp for this run
-    run_timestamp = datetime.now()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    portfolio_copy = copy.deepcopy(portfolio)
     
-    # Log the run start
-    logger.info(f"Starting hedge fund run at {run_timestamp.isoformat()} with tickers: {tickers}")
+    # Get the alpaca client for updating portfolio
+    alpaca_client = get_alpaca_client()
     
-    # Save this run to the history
-    save_run_history(tickers, run_timestamp.isoformat())
+    # Update portfolio with latest data
+    if alpaca_client:
+        portfolio_copy = update_portfolio_status(alpaca_client, portfolio_copy)
     
-    # Set up cache directory 
-    cache_dir = Path("src/cache")
-    if not cache_dir.exists():
-        logger.info(f"Creating cache directory: {cache_dir}")
-        cache_dir.mkdir(exist_ok=True)
+    # Set up the state for the workflow
+    state = AgentState(
+        data={
+            "tickers": tickers,
+            "start_date": start_date,
+            "end_date": end_date,
+            "portfolio": portfolio_copy,
+            "price_data": {},
+            "analyst_signals": {},
+        },
+        metadata={
+            "timestamp": timestamp,
+            "show_reasoning": show_reasoning,
+            "model_name": model_name,
+            "model_provider": model_provider,
+            "selected_analysts": selected_analysts,
+        },
+    )
     
-    # Check for existing cache files
-    analysts_cache_dir = cache_dir / "analysts"
-    if not analysts_cache_dir.exists():
-        logger.info(f"Creating analysts cache directory: {analysts_cache_dir}")
-        analysts_cache_dir.mkdir(exist_ok=True)
+    # Get the appropriate workflow and compile it
+    if not selected_analysts:
+        workflow = create_default_workflow().compile()
     else:
-        # List existing cache files
-        existing_cache = list(analysts_cache_dir.glob("*.json"))
-        if existing_cache:
-            logger.info(f"Found {len(existing_cache)} existing cache files:")
-            for cache_file in existing_cache:
-                logger.info(f"  - {cache_file.name}")
-        else:
-            logger.info("No existing cache files found")
+        workflow = create_workflow(selected_analysts).compile()
     
-    # Check if we should use cached data
-    use_cached_data = should_use_cached_data(tickers)
-    logger.info(f"Using cached data: {use_cached_data}")
+    # Run the workflow using the correct method for compiled workflows
+    result = workflow.invoke(state)
     
-    # Always run these agents with fresh data
-    fresh_data_agents = ["risk_management_agent", "portfolio_management_agent"]
-    logger.info(f"These agents will always use fresh data: {fresh_data_agents}")
-    
-    # Log cached agents
-    if use_cached_data:
-        cached_agents = []
-        for cache_file in analysts_cache_dir.glob("*.json"):
-            parts = cache_file.stem.split('_')
-            if len(parts) > 0:
-                agent_name = parts[0]
-                if agent_name not in fresh_data_agents and agent_name not in cached_agents:
-                    cached_agents.append(agent_name)
-        
-        if cached_agents:
-            logger.info(f"These agents have cached data available: {cached_agents}")
-        else:
-            logger.info("No cached data available for any agents")
-    
-    # Initialize agents and workflow
-    try:
-        # Set up progress tracking
-        progress.start()
-        progress.update_status("Initializing", status="Setting up workflow")
-        
-        # Initialize portfolio with alpaca
-        if args is not None:
-            portfolio, alpaca_client = init_portfolio(args)
-        else:
-            # Create default portfolio if args not provided
-            alpaca_client = get_alpaca_client()
-            if not portfolio:
-                portfolio = {
-                    "cash": 10000.0,
-                    "portfolio_value": 10000.0,
-                    "positions": {},
-                    "realized_gains": {},
-                    "current_prices": {}
-                }
-        
-        # Load the AI Hedge Fund workflow with the analysts you selected
-        workflow = create_workflow(selected_analysts)
-        workflow = workflow.compile()
-        
-        progress.update_status("Running", status="Executing workflow")
-        
-        # Create initial state
-        state = {
-            "messages": [],
-            "data": {
-                "tickers": tickers,
-                "start_date": start_date,
-                "end_date": end_date,
-                "portfolio": portfolio,
-                "price_data": {},
-                "analyst_signals": {},
-            },
-            "metadata": {
-                "model_name": model_name,
-                "model_provider": model_provider,
-                "show_reasoning": show_reasoning,
-            }
-        }
-        
-        # Execute the workflow for the selected tickers
-        result = workflow.invoke(state)
-        
-        progress.update_status("Finalizing", status="Processing results")
-        
-        # Extract data from result
-        data = result.get("data", {})
-        updated_portfolio = data.get("portfolio", portfolio)
-        
-        # Log the structure of the result to debug
-        logger.info(f"Result structure: {list(result.keys() if isinstance(result, dict) else [])}")
-        logger.info(f"Data structure: {list(data.keys() if isinstance(data, dict) else [])}")
-        
-        # Look for decisions in various possible locations
-        decisions = {}
-        
-        # Check for direct decisions in result
-        if isinstance(result, dict) and "decisions" in result:
-            decisions = result["decisions"]
-            logger.info("Found decisions directly in result")
-        
-        # Check if data contains portfolio_decisions
-        elif isinstance(data, dict) and "portfolio_decisions" in data:
-            decisions = data["portfolio_decisions"]
-            logger.info("Found decisions in data['portfolio_decisions']")
-        
-        # Check if analyst_signals contains portfolio_management_agent with decisions
-        elif isinstance(data, dict) and "analyst_signals" in data:
-            analyst_signals = data["analyst_signals"]
-            if isinstance(analyst_signals, dict) and "portfolio_management_agent" in analyst_signals:
-                pm_data = analyst_signals["portfolio_management_agent"]
-                if isinstance(pm_data, dict) and "decisions" in pm_data:
-                    decisions = pm_data["decisions"]
-                    logger.info("Found decisions in analyst_signals['portfolio_management_agent']['decisions']")
-        
-        # Create return data structure
-        final_result = {
-            "decisions": decisions,
-            "analyst_signals": data.get("analyst_signals", {}),
-            "portfolio": updated_portfolio,
-            "tickers": tickers,  # Add tickers to the result
-        }
-        
-        # Check if decisions is empty
-        if not decisions:
-            logger.warning(f"No trading decisions found in result. Creating default 'hold' decisions for {tickers}")
-            from agents.portfolio_manager import PortfolioDecision
-            
-            # Create default hold decisions for all tickers
-            decisions = {}
-            for ticker in tickers:
-                decisions[ticker] = PortfolioDecision(
-                    action="hold",
-                    quantity=0,
-                    confidence=50.0,
-                    reasoning=f"No valid trading decision was generated for {ticker}. Using hold as fallback."
-                )
-            final_result["decisions"] = decisions
-        
-        logger.info(f"Final decisions: {list(final_result['decisions'].keys() if isinstance(final_result['decisions'], dict) else [])}")
-        logger.info(f"Tickers in result: {final_result['tickers']}")
-        
-        progress.update_status("Complete", status="Run completed")
-        
-        return final_result
-    
-    except KeyboardInterrupt:
-        progress.stop()
-        logger.warning("Run interrupted by user")
-        return {"error": "Run interrupted by user"}
-    except Exception as e:
-        progress.update_status("Error", status=f"Error: {str(e)}")
-        progress.stop()
-        logger.error(f"Error running hedge fund: {e}", exc_info=True)
-        return {"error": str(e)}
-    finally:
-        # Always stop progress tracking
-        progress.stop()
+    return result
 
 
 if __name__ == "__main__":

@@ -116,7 +116,15 @@ def paul_tudor_jones_agent(state: AgentState):
         show_agent_reasoning({ticker: signal.model_dump() for ticker, signal in tudor_jones_analysis.items()}, "Paul Tudor Jones Agent")
 
     # Add the signal to the analyst_signals list
-    state["data"]["analyst_signals"]["paul_tudor_jones_agent"] = tudor_jones_analysis
+    # Ensure we're storing the signals as proper dictionaries, not strings
+    proper_signals = {}
+    for ticker, signal in tudor_jones_analysis.items():
+        proper_signals[ticker] = {
+            "signal": signal.signal,
+            "confidence": float(signal.confidence),
+            "reasoning": signal.reasoning
+        }
+    state["data"]["analyst_signals"]["paul_tudor_jones_agent"] = proper_signals
 
     return {
         "messages": state["messages"] + [message],

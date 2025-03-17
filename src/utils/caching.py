@@ -107,9 +107,101 @@ def cached_analyst(cache_only_if_success=True):
                             # Check if we should use cached data from run_cache
                             if should_use_cached_data(tickers):
                                 logger.info(f"Using cached data for {func_name} ({ticker})")
-                                return cached_data
-                            else:
-                                logger.info(f"Running {func_name} with fresh data (cache TTL expired)")
+                                
+                                # Ensure we return the cached data in the correct state format
+                                # Check if this is an analyst signal meant for the state
+                                if "signal" in cached_data or all(isinstance(v, dict) for v in cached_data.values() if isinstance(v, dict)):
+                                    # This appears to be signal data that should be added to the state
+                                    
+                                    # Process signals that are stored as strings instead of objects
+                                    if any(isinstance(v, str) and "signal=" in v and "confidence=" in v for v in cached_data.values()):
+                                        logger.info("Detected string-formatted signals in cache - converting to proper format")
+                                        import re
+                                        for k, v in list(cached_data.items()):
+                                            if isinstance(v, str) and "signal=" in v and "confidence=" in v:
+                                                try:
+                                                    signal_match = re.search(r"signal=['\"]([^'\"]+)['\"]", v)
+                                                    confidence_match = re.search(r"confidence=([0-9.]+)", v)
+                                                    reasoning_match = re.search(r"reasoning=['\"]([^$]*?)['\"](?:\s|$)", v)
+                                                    
+                                                    if signal_match and confidence_match:
+                                                        signal = signal_match.group(1)
+                                                        confidence = float(confidence_match.group(1))
+                                                        reasoning = reasoning_match.group(1) if reasoning_match else ""
+                                                        
+                                                        cached_data[k] = {
+                                                            "signal": signal,
+                                                            "confidence": confidence,
+                                                            "reasoning": reasoning
+                                                        }
+                                                        logger.info(f"Converted string signal for {k} with confidence={confidence}")
+                                                except Exception as e:
+                                                    logger.error(f"Failed to convert string signal: {e}")
+                                    
+                                    # Make a shallow copy of the state to avoid modifying the original
+                                    if isinstance(state, dict):
+                                        state_copy = state.copy()
+                                        if "data" not in state_copy:
+                                            state_copy["data"] = {}
+                                        if "analyst_signals" not in state_copy["data"]:
+                                            state_copy["data"]["analyst_signals"] = {}
+                                            
+                                        # Add the cached data to the analyst signals
+                                        norm_name = normalized_func_name or func_name
+                                        state_copy["data"]["analyst_signals"][norm_name] = cached_data
+                                        
+                                        # Create a message with the cached data
+                                        from langchain_core.messages import HumanMessage
+                                        message = HumanMessage(
+                                            content=json.dumps(cached_data),
+                                            name=func_name,
+                                        )
+                                        
+                                        if "messages" not in state_copy:
+                                            state_copy["messages"] = []
+                                        state_copy["messages"].append(message)
+                                        
+                                        # Return the updated state
+                                        return {
+                                            "messages": state_copy.get("messages", []),
+                                            "data": state_copy.get("data", {}),
+                                            "metadata": state_copy.get("metadata", {})
+                                        }
+                                    # Handle AgentState object
+                                    elif hasattr(state, 'data'):
+                                        try:
+                                            # Extract current data
+                                            if hasattr(state.data, "analyst_signals"):
+                                                # Add the cached data to analyst_signals
+                                                norm_name = normalized_func_name or func_name
+                                                state.data.analyst_signals[norm_name] = cached_data
+                                            else:
+                                                # Create analyst_signals if it doesn't exist
+                                                setattr(state.data, "analyst_signals", {
+                                                    norm_name: cached_data
+                                                })
+                                            
+                                            # Create a message with the cached data
+                                            from langchain_core.messages import HumanMessage
+                                            message = HumanMessage(
+                                                content=json.dumps(cached_data),
+                                                name=func_name,
+                                            )
+                                            
+                                            # Return updated state in correct format
+                                            return {
+                                                "messages": [message],
+                                                "data": state.data
+                                            }
+                                        except Exception as e:
+                                            logger.error(f"Error updating AgentState with cached data: {e}")
+                                            # Fall back to original behavior
+                                            
+                                    # If we couldn't create a proper state, just return the cached data
+                                    # (the function that called it will have to handle it properly)
+                                    return cached_data
+                                else:
+                                    logger.info(f"Running {func_name} with fresh data (cache TTL expired)")
                         else:
                             logger.warning(f"Cached data for {func_name} ({ticker}) has unexpected format, will run fresh")
                 except json.JSONDecodeError as e:

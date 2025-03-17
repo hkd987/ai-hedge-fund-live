@@ -44,9 +44,10 @@ try:
         StopOrderRequest,
         StopLimitOrderRequest,
         TrailingStopOrderRequest,
-        BracketOrderRequest
+        BracketOrderRequest,
+        GetOrdersRequest
     )
-    from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
+    from alpaca.trading.enums import OrderSide, TimeInForce, OrderType, OrderStatus
     ALPACA_AVAILABLE = True
 except ImportError:
     ALPACA_AVAILABLE = False
@@ -109,45 +110,98 @@ def get_alpaca_client():
 
 def get_alpaca_open_orders(client, ticker=None):
     """
-    Get all open orders from Alpaca, optionally filtered by ticker.
+    Get open orders from Alpaca
     
     Args:
-        client: Initialized Alpaca client
-        ticker: Optional ticker symbol to filter by
+        client: Alpaca client
+        ticker: Optional ticker to filter orders
         
     Returns:
-        dict: Dictionary of ticker to list of open orders
+        Dictionary of ticker to list of orders
     """
+    import logging
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import OrderStatus
+
     if not client:
-        logger.warning("No Alpaca client available. Cannot get open orders.")
+        logging.warning("No Alpaca client provided for get_alpaca_open_orders")
         return {}
+        
+    logging.info("Attempting to get open orders from Alpaca")
     
     try:
-        # Get all open orders
-        if ticker:
-            orders = client.get_orders(status="open", symbols=ticker)
-        else:
-            orders = client.get_orders(status="open")
+        # Create a request params object instead of passing status directly
+        request_params = GetOrdersRequest(
+            status=OrderStatus.OPEN
+        )
         
-        # Organize by ticker
+        # Get the orders using the request params object
+        all_orders = client.get_orders(request_params)
+        
+        logging.info(f"Order retrieval result type: {type(all_orders)}")
+        logging.info(f"Number of orders retrieved: {len(all_orders) if all_orders else 0}")
+        
+        # If no orders, return empty dict
+        if not all_orders:
+            return {}
+            
+        # Group orders by ticker (symbol)
         orders_by_ticker = {}
-        for order in orders:
-            symbol = order.symbol
-            if symbol not in orders_by_ticker:
-                orders_by_ticker[symbol] = []
-            orders_by_ticker[symbol].append(order)
         
-        # Log order information
-        for ticker, ticker_orders in orders_by_ticker.items():
-            logger.info(f"Found {len(ticker_orders)} open orders for {ticker}")
-            for order in ticker_orders:
-                logger.info(f"  Order {order.id}: {order.side} {order.qty} shares at ${order.limit_price if hasattr(order, 'limit_price') and order.limit_price else 'market'}")
-        
+        for order in all_orders:
+            # If a specific ticker was requested, skip others
+            if ticker and order.symbol != ticker:
+                continue
+                
+            if order.symbol not in orders_by_ticker:
+                orders_by_ticker[order.symbol] = []
+                
+            orders_by_ticker[order.symbol].append(order)
+            
+        # Try to get partially filled orders too
+        try:
+            partial_params = GetOrdersRequest(
+                status=OrderStatus.PARTIALLY_FILLED
+            )
+            partial_orders = client.get_orders(partial_params)
+            
+            if partial_orders:
+                for order in partial_orders:
+                    if ticker and order.symbol != ticker:
+                        continue
+                        
+                    if order.symbol not in orders_by_ticker:
+                        orders_by_ticker[order.symbol] = []
+                        
+                    orders_by_ticker[order.symbol].append(order)
+        except Exception as e:
+            logging.warning(f"Error getting partially filled orders: {e}")
+            
+        # Add pending_new orders if available
+        try:
+            pending_params = GetOrdersRequest(
+                status=OrderStatus.NEW
+            )
+            pending_orders = client.get_orders(pending_params)
+            
+            if pending_orders:
+                for order in pending_orders:
+                    if ticker and order.symbol != ticker:
+                        continue
+                        
+                    if order.symbol not in orders_by_ticker:
+                        orders_by_ticker[order.symbol] = []
+                        
+                    orders_by_ticker[order.symbol].append(order)
+        except Exception as e:
+            logging.warning(f"Error getting new orders: {e}")
+            
         return orders_by_ticker
+        
     except Exception as e:
-        logger.error(f"Failed to get open orders: {e}")
+        logging.error(f"Error getting open orders: {e}")
         return {}
-
+        
 
 def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None):
     """Execute a trade with Alpaca, applying risk management rules"""
@@ -607,6 +661,34 @@ def serialize_for_json(obj):
                     logger.warning(f"Error serializing tuple item: {e}")
             return result
             
+        # Handle string-formatted signals (for cached Paul Tudor Jones signals)
+        elif isinstance(obj, str) and "signal=" in obj and "confidence=" in obj and "reasoning=" in obj:
+            try:
+                # Extract signal, confidence, and reasoning using regex
+                import re
+                signal_match = re.search(r"signal=['\"]([^'\"]+)['\"]", obj)
+                confidence_match = re.search(r"confidence=([0-9.]+)", obj)
+                reasoning_match = re.search(r"reasoning=['\"]([^$]*?)['\"](?:\s|$)", obj)
+                
+                signal = signal_match.group(1) if signal_match else "neutral"
+                confidence = float(confidence_match.group(1)) if confidence_match else 50.0
+                reasoning = reasoning_match.group(1) if reasoning_match else ""
+                
+                logger.info(f"Extracted signal={signal}, confidence={confidence} from string")
+                
+                return {
+                    "signal": signal,
+                    "confidence": confidence,
+                    "reasoning": reasoning
+                }
+            except Exception as e:
+                logger.warning(f"Error parsing string-formatted signal: {e}")
+                return {
+                    "signal": "neutral",
+                    "confidence": 50.0,
+                    "reasoning": "Error parsing signal string"
+                }
+            
         # Special handling for William O'Neil signals
         elif obj.__class__.__name__ == 'WilliamONeilSignal':
             try:
@@ -628,8 +710,13 @@ def serialize_for_json(obj):
             try:
                 # Fix 0 confidence
                 confidence = getattr(obj, "confidence", 50.0)
-                if confidence == 0:
-                    confidence = 50.0
+                
+                # Convert from decimal (0-1) to percentage (0-100) if needed
+                if confidence > 0 and confidence <= 1.0:
+                    logger.info(f"Converting decimal confidence {confidence} to percentage for {obj.__class__.__name__}")
+                    confidence = confidence * 100.0
+                elif confidence == 0:
+                    confidence = 50.0  # Assign neutral confidence to 0 values
                     
                 return {
                     "signal": str(getattr(obj, "signal", "neutral")),
@@ -686,8 +773,29 @@ def portfolio_management_agent(state: AgentState):
     # Ensure portfolio is a dictionary
     if not isinstance(portfolio, dict):
         logger.error(f"Portfolio is not a dictionary: {type(portfolio)}")
-        portfolio = {}
+        logger.error(f"This might be due to confusing alpaca_client with portfolio")
         
+        # If it looks like we got an alpaca client instead of a portfolio, create a new portfolio
+        if hasattr(portfolio, 'get_account'):
+            logger.warning("Detected alpaca client passed as portfolio. Creating new portfolio.")
+            try:
+                # Try to create a portfolio from the client
+                account = portfolio.get_account()
+                portfolio = {
+                    "cash": float(account.cash),
+                    "portfolio_value": float(account.equity),
+                    "positions": {},
+                    "realized_gains": {},
+                    "current_prices": {},
+                    "open_orders": {}
+                }
+                logger.info(f"Created new portfolio with ${portfolio['cash']} cash")
+            except Exception as e:
+                logger.error(f"Failed to create portfolio from client: {e}")
+                portfolio = {}
+        else:
+            portfolio = {}
+
     # Ensure portfolio has a reasonable cash value
     if not portfolio or "cash" not in portfolio or portfolio.get("cash", 0) < 1000:
         logger.warning("Portfolio has no cash or unreasonably low cash, initializing with default")
@@ -820,12 +928,22 @@ def portfolio_management_agent(state: AgentState):
     simplified_signals = {}
     
     for analyst_name, signals in analyst_signals.items():
+        logger.info(f"Processing signals from {analyst_name}")
         if isinstance(signals, dict):
             simplified_analyst_signals = {}
             
             for ticker in tickers:
                 if ticker in signals:
                     signal = signals[ticker]
+                    
+                    # Debug log to see the signal format
+                    logger.info(f"Signal from {analyst_name} for {ticker} has type: {type(signal)}")
+                    if isinstance(signal, str) and len(signal) > 100:
+                        logger.info(f"Signal snippet: {signal[:100]}...")
+                    elif isinstance(signal, dict) and 'confidence' in signal:
+                        logger.info(f"Signal confidence: {signal['confidence']}")
+                    elif hasattr(signal, 'confidence'):
+                        logger.info(f"Signal confidence (attribute): {signal.confidence}")
                     
                     # Skip None signals
                     if signal is None:
@@ -1784,3 +1902,104 @@ def create_default_portfolio_output(tickers=None):
         logger.warning("No tickers provided to create_default_portfolio_output, returning empty decisions")
     
     return PortfolioManagerOutput(decisions=decisions)
+
+
+def diagnose_alpaca_orders(client):
+    """
+    Comprehensive diagnostic function to check all orders in Alpaca account
+    
+    Args:
+        client: Alpaca client
+        
+    Returns:
+        Dictionary with diagnostic information
+    """
+    import logging
+    import os
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import OrderStatus
+    
+    if not client:
+        logging.error("No Alpaca client provided for diagnose_alpaca_orders")
+        return {
+            "error": "No Alpaca client provided",
+            "orders": [],
+            "order_count": 0
+        }
+    
+    logging.info("========== ALPACA ORDER DIAGNOSTICS ==========")
+    
+    # Check if using paper trading
+    paper_trading = os.getenv("LIVE_TRADING", "false").lower() != "true"
+    environment = "paper trading" if paper_trading else "live trading"
+    logging.info(f"Using {environment} environment")
+    
+    # Get account details
+    try:
+        account = client.get_account()
+        logging.info(f"Account details: ID={account.id}, Status={account.status}")
+    except Exception as e:
+        logging.error(f"Error getting account details: {e}")
+    
+    # Try to get all orders regardless of status
+    statuses_to_try = ["all", "open", "closed", "new", "partially_filled", "filled", 
+                        "canceled", "expired", "pending_new", "accepted", "pending", 
+                        "accepted_for_bidding", "stopped", "rejected", "suspended", 
+                        "calculated", "done_for_day"]
+    
+    all_orders = []
+    status_breakdown = {}
+    
+    # Try getting orders with GetOrdersRequest for all standard statuses
+    for status_name in statuses_to_try:
+        try:
+            if status_name == "all":
+                # For "all" status, don't specify a status
+                orders = client.get_orders()
+            else:
+                # Try to get the proper enum value if possible
+                try:
+                    status_enum = getattr(OrderStatus, status_name.upper())
+                    request_params = GetOrdersRequest(status=status_enum)
+                    orders = client.get_orders(request_params)
+                except AttributeError:
+                    # If the enum doesn't exist, try the string directly
+                    request_params = GetOrdersRequest(status=status_name)
+                    orders = client.get_orders(request_params)
+                
+            if orders:
+                logging.info(f"Status '{status_name}' returned {len(orders)} orders")
+                status_breakdown[status_name] = len(orders)
+                
+                # Only add to all_orders if not already there (avoid duplicates)
+                for order in orders:
+                    if not any(o.id == order.id for o in all_orders):
+                        all_orders.append(order)
+        except Exception as e:
+            logging.info(f"Status '{status_name}' not supported or error: {e}")
+    
+    # Check specifically for AAPL and VOO orders
+    aapl_orders = [o for o in all_orders if o.symbol == "AAPL"]
+    voo_orders = [o for o in all_orders if o.symbol == "VOO"]
+    
+    logging.info(f"Found {len(aapl_orders)} orders for AAPL")
+    if aapl_orders:
+        for i, order in enumerate(aapl_orders[:3]):  # Log up to 3 orders
+            logging.info(f"AAPL Order {i+1}: ID={order.id}, Status={order.status}, Side={order.side}, Qty={order.qty}")
+    
+    logging.info(f"Found {len(voo_orders)} orders for VOO")
+    if voo_orders:
+        for i, order in enumerate(voo_orders[:3]):  # Log up to 3 orders
+            logging.info(f"VOO Order {i+1}: ID={order.id}, Status={order.status}, Side={order.side}, Qty={order.qty}")
+    
+    logging.info(f"Retrieved total of {len(all_orders)} orders across all status types")
+    logging.info("========== END ALPACA ORDER DIAGNOSTICS ==========")
+    
+    return {
+        "environment": environment,
+        "orders": all_orders,
+        "order_count": len(all_orders),
+        "status_breakdown": status_breakdown,
+        "aapl_orders": len(aapl_orders),
+        "voo_orders": len(voo_orders)
+    }
