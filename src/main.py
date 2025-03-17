@@ -689,9 +689,11 @@ def init_portfolio(args):
             # Fall back to default portfolio
             
     # Default portfolio if Alpaca is not available
+    # Use default values - don't try to access args.initial_capital which may not exist
+    default_capital = 100000.0
     portfolio = {
-        "cash": args.initial_capital if args else 100000.0,
-        "portfolio_value": args.initial_capital if args else 100000.0,
+        "cash": default_capital,
+        "portfolio_value": default_capital,
         "positions": {},
         "realized_gains": 0.0,
         "current_prices": {},

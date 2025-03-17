@@ -1,15 +1,19 @@
 import json
 import os
+import logging
+import traceback
+import time
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-import logging
-
-from graph.state import AgentState, show_agent_reasoning
+from typing import Dict, List, Optional, Tuple, Any, Callable
+from datetime import datetime, time as datetime_time, timedelta, date
 from pydantic import BaseModel, Field
 from typing_extensions import Literal
+
+from graph.state import AgentState, show_agent_reasoning
 from utils.progress import progress
-from utils.llm import call_llm
 from utils.caching import cached_analyst
+from utils.llm import call_llm
 
 # Import risk management module
 from utils.risk_manager import (
@@ -48,6 +52,12 @@ try:
         GetOrdersRequest
     )
     from alpaca.trading.enums import OrderSide, TimeInForce, OrderType, OrderStatus
+    
+    # Import Alpaca data client for price retrieval
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    
     ALPACA_AVAILABLE = True
 except ImportError:
     ALPACA_AVAILABLE = False
@@ -204,11 +214,31 @@ def get_alpaca_open_orders(client, ticker=None):
 
 
 def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None):
-    """Execute a trade with Alpaca, applying risk management rules"""
+    """
+    Execute a trade with Alpaca, applying risk management rules
+    
+    Args:
+        ticker: Ticker symbol
+        action: Trade action (buy, sell, short, cover)
+        quantity: Number of shares
+        current_price: Current price of the security
+        prices_df: Optional price dataframe for dynamic stop calculation
+        
+    Returns:
+        dict: Results of the trade execution including status and details
+    """
+    logger.info(f"=== EXECUTE TRADE START: {ticker} {action} {quantity} at ${current_price} ===")
+    
     # Check if the trade is allowed by our risk management system
     if not can_execute_trade(ticker, action, quantity, current_price):
         logger.warning(f"Trade rejected by risk management: {action} {quantity} shares of {ticker}")
-        return False
+        return {
+            "success": False,
+            "reason": "Trade rejected by risk management",
+            "ticker": ticker,
+            "action": action,
+            "quantity": quantity
+        }
     
     # First, check market hours to see if this is an appropriate time to trade
     if prices_df is not None:
@@ -221,14 +251,33 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
     
     # Get Alpaca client
     client = get_alpaca_client()
-    if not client:
+    
+    # Log Alpaca client info
+    if client:
+        try:
+            account = client.get_account()
+            env_type = "paper trading" if getattr(account, 'is_paper', True) else "live trading"
+            logger.info(f"Alpaca client initialized for {env_type}, account ID: {account.id}")
+            logger.info(f"Account status: {account.status}, buying power: ${float(account.buying_power):.2f}")
+        except Exception as e:
+            logger.error(f"Error getting account info: {e}")
+    else:
         logger.error("Alpaca client not available")
-        return False
+        return {
+            "success": False, 
+            "reason": "Alpaca client not available", 
+            "ticker": ticker
+        }
     
     # Check for existing open orders for this ticker
     open_orders = get_alpaca_open_orders(client, ticker)
     if ticker in open_orders and open_orders[ticker]:
         existing_orders = open_orders[ticker]
+        logger.info(f"Found {len(existing_orders)} existing orders for {ticker}")
+        
+        # Log details about each existing order
+        for i, order in enumerate(existing_orders):
+            logger.info(f"  Order {i+1}: ID={order.id}, Status={order.status}, Side={order.side}, Qty={order.qty}")
         
         # Check if there's already an order with the same action
         for order in existing_orders:
@@ -243,7 +292,14 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
                 
             if is_same_action:
                 logger.warning(f"There is already an open {order_side} order for {ticker}. Skipping duplicate order.")
-                return False
+                return {
+                    "success": False,
+                    "reason": f"Duplicate {order_side} order exists",
+                    "ticker": ticker,
+                    "action": action
+                }
+    else:
+        logger.info(f"No existing orders found for {ticker}")
     
     # Map our action to Alpaca's OrderSide and determine if it's a short order
     side_mapping = {
@@ -255,9 +311,14 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
     
     if action not in side_mapping:
         logger.error(f"Unsupported action: {action}")
-        return False
+        return {
+            "success": False,
+            "reason": f"Unsupported action: {action}",
+            "ticker": ticker
+        }
     
     side = side_mapping[action]
+    logger.info(f"Mapped action '{action}' to OrderSide '{side}'")
     
     try:
         # For short and cover, we need to check the current position
@@ -266,12 +327,18 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
             try:
                 position = client.get_position(ticker)
                 current_qty = int(position.qty)
+                logger.info(f"Found existing position for {ticker}: {current_qty} shares")
                 
                 # Handle cover (closing a short position)
                 if action == "cover":
                     if current_qty >= 0:  # Not a short position
                         logger.warning(f"Cannot cover {ticker}: No short position exists")
-                        return False
+                        return {
+                            "success": False,
+                            "reason": "No short position exists",
+                            "ticker": ticker,
+                            "action": action
+                        }
                     
                     # Limit quantity to current short position
                     if abs(current_qty) < quantity:
@@ -281,30 +348,43 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
                 # Handle short (creating a short position or adding to existing short)
                 elif action == "short":
                     if current_qty < 0:  # Already have a short position
-                        # Check if this would exceed our maximum short target
+                        # Check if this would exceed our maximum short
                         # This is a safety check to prevent doubling up on shorts
                         logger.info(f"Already have a short position of {abs(current_qty)} shares for {ticker}")
                         # You can add additional logic here if needed
             except Exception as e:
                 # Position doesn't exist
+                logger.info(f"No position found for {ticker}: {str(e)}")
                 if action == "cover":
                     logger.warning(f"Cannot cover {ticker}: No position exists")
-                    return False
+                    return {
+                        "success": False,
+                        "reason": "No position exists to cover",
+                        "ticker": ticker,
+                        "action": action,
+                        "error": str(e)
+                    }
                 elif action == "short":
                     # This is a new short position, no special handling needed
-                    pass
+                    logger.info(f"Creating new short position for {ticker}")
         
         # For buy and sell, verify the current position
         elif action in ["buy", "sell"]:
             try:
                 position = client.get_position(ticker)
                 current_qty = int(position.qty)
+                logger.info(f"Found existing position for {ticker}: {current_qty} shares")
                 
                 # Handle sell (closing a long position)
                 if action == "sell":
                     if current_qty <= 0:  # Not a long position
                         logger.warning(f"Cannot sell {ticker}: No long position exists")
-                        return False
+                        return {
+                            "success": False,
+                            "reason": "No long position exists",
+                            "ticker": ticker,
+                            "action": action
+                        }
                     
                     # Limit quantity to current long position
                     if current_qty < quantity:
@@ -318,12 +398,19 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
                         logger.info(f"Adding to existing long position of {current_qty} shares for {ticker}")
             except Exception as e:
                 # Position doesn't exist
+                logger.info(f"No position found for {ticker}: {str(e)}")
                 if action == "sell":
                     logger.warning(f"Cannot sell {ticker}: No position exists")
-                    return False
+                    return {
+                        "success": False,
+                        "reason": "No position exists to sell",
+                        "ticker": ticker,
+                        "action": action,
+                        "error": str(e)
+                    }
                 elif action == "buy":
                     # This is a new buy position, no special handling needed
-                    pass
+                    logger.info(f"Creating new buy position for {ticker}")
         
         # Calculate stop loss and take profit prices using dynamic ATR-based values if available
         stop_loss_price = None
@@ -359,6 +446,8 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
                 stop_loss_price = current_price * (1 + RISK_PARAMS["STOP_LOSS_PCT"])
                 # For short, the take profit is below the entry price
                 take_profit_price = current_price * (1 - RISK_PARAMS["TAKE_PROFIT_PCT"])
+            
+            logger.info(f"Using fixed percentage stops for {ticker} {action}: Stop loss at ${stop_loss_price:.2f}, Take profit at ${take_profit_price:.2f}")
         
         if action == "buy":
             # Use bracket order for buy orders to include stop loss and take profit
@@ -406,19 +495,45 @@ def execute_alpaca_trade(ticker, action, quantity, current_price, prices_df=None
                 side=side,
                 time_in_force=TimeInForce.DAY
             )
+            logger.info(f"Creating market order for {action} {ticker}: {quantity} shares")
+        
+        # Log the order request details
+        logger.info(f"Submitting order: {order_data}")
         
         # Submit the order
         order = client.submit_order(order_data)
-        logger.info(f"Submitted {action} order for {quantity} shares of {ticker}: Order ID {order.id}")
+        logger.info(f"Successfully submitted {action} order for {quantity} shares of {ticker}: Order ID {order.id}")
         
         # Record the successful trade in our risk management system
         record_trade_execution(ticker, action, quantity, current_price, quantity * current_price)
         
-        return True
+        logger.info(f"=== EXECUTE TRADE SUCCESS: {ticker} {action} {quantity} ===")
+        
+        return {
+            "success": True,
+            "ticker": ticker,
+            "action": action,
+            "quantity": quantity,
+            "price": current_price,
+            "order_id": order.id,
+            "stop_loss": stop_loss_price,
+            "take_profit": take_profit_price
+        }
         
     except Exception as e:
-        logger.error(f"Failed to submit {action} order for {ticker}: {e}")
-        return False
+        error_message = str(e)
+        logger.error(f"Failed to submit {action} order for {ticker}: {error_message}")
+        logger.exception("Detailed error traceback:")
+        
+        logger.info(f"=== EXECUTE TRADE FAILED: {ticker} {action} {quantity} ===")
+        
+        return {
+            "success": False,
+            "reason": f"Order submission failed: {error_message}",
+            "ticker": ticker,
+            "action": action,
+            "quantity": quantity
+        }
 
 
 def get_alpaca_portfolio_state(client, tickers):
@@ -778,43 +893,67 @@ def portfolio_management_agent(state: AgentState):
         # Make sure we have current prices for all tickers
         missing_prices = [ticker for ticker in tickers if ticker not in current_prices]
         if missing_prices:
-            logger.warning(f"Missing current prices for {missing_prices}, using default values")
-            for ticker in missing_prices:
-                current_prices[ticker] = 100.0  # Default price if not available
+            logger.warning(f"Missing prices for tickers: {missing_prices}")
+            # Try to get current prices from Alpaca
+            try:
+                client = get_alpaca_client()
+                if client:
+                    for ticker in missing_prices:
+                        try:
+                            # Get the latest bar
+                            from alpaca.data.historical import StockHistoricalDataClient
+                            from alpaca.data.requests import StockBarsRequest
+                            from alpaca.data.timeframe import TimeFrame
+                            
+                            api_key = os.getenv("ALPACA_API_KEY")
+                            api_secret = os.getenv("ALPACA_API_SECRET")
+                            
+                            if api_key and api_secret:
+                                data_client = StockHistoricalDataClient(api_key, api_secret)
+                                request_params = StockBarsRequest(
+                                    symbol_or_symbols=[ticker],
+                                    timeframe=TimeFrame.Day,
+                                    start=(datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"),
+                                    end=datetime.now().strftime("%Y-%m-%d")
+                                )
+                                bars = data_client.get_stock_bars(request_params)
+                                if bars and ticker in bars:
+                                    df = bars[ticker].df
+                                    if not df.empty:
+                                        # Get the most recent close price
+                                        current_prices[ticker] = df['close'].iloc[-1]
+                                        logger.info(f"Got current price for {ticker} from Alpaca: ${current_prices[ticker]:.2f}")
+                        except Exception as e:
+                            logger.warning(f"Error getting current price for {ticker}: {e}")
+            except Exception as e:
+                logger.warning(f"Error getting current prices from Alpaca: {e}")
+                
+        # Generate the trading decisions
+        logger.info(f"Generating trading decisions for tickers: {tickers}")
+        logger.info(f"Portfolio cash: ${portfolio.get('cash', 0):.2f}")
         
-        # Check if we need to initialize any missing analyst signals
+        # We need to gather analyst signals in the format required by generate_trading_decision
+        signals_by_ticker = {}
         for ticker in tickers:
-            ticker_signals = {}
+            signals_by_ticker[ticker] = {}
+            
             for analyst, signals in analyst_signals.items():
                 if ticker in signals:
-                    ticker_signals[analyst] = signals[ticker]
-            
-            # If no analyst signals for this ticker, initialize with empty values
-            if not ticker_signals:
-                logger.warning(f"No analyst signals for {ticker}, using default neutral signals")
-                
-        # Get the risk dashboard
-        risk_dashboard = portfolio.get("risk_dashboard", {})
-        if not risk_dashboard:
-            logger.warning("No risk dashboard found in portfolio, using empty dashboard")
-            risk_dashboard = {}
+                    signals_by_ticker[ticker][analyst] = signals[ticker]
         
-        # Check if we have positions in any tickers that aren't in our list
-        extra_tickers = []
-        if "positions" in portfolio:
-            for ticker in portfolio["positions"]:
-                if ticker not in tickers:
-                    extra_tickers.append(ticker)
+        # Generate a comprehensive risk dashboard
+        from utils.enhanced_risk import generate_risk_dashboard
+        risk_dashboard = generate_risk_dashboard(
+            portfolio=portfolio,
+            tickers=tickers,
+            prices_data=data.get("price_data", {})
+        )
         
-        if extra_tickers:
-            logger.info(f"Found {len(extra_tickers)} additional tickers in portfolio positions: {extra_tickers}")
-            tickers = tickers + extra_tickers
-        
-        # Generate the trading decisions using the LLM
-        progress.update_status("portfolio_management_agent", None, "Consulting LLM")
+        logger.info("Calling generate_trading_decision")
+        # Call the function to generate trading decisions
         trading_decisions = generate_trading_decision(
             tickers=tickers,
-            signals_by_ticker=analyst_signals,
+            signals_by_ticker=signals_by_ticker,
             current_prices=current_prices,
             max_shares=max_shares,
             portfolio=portfolio,
@@ -838,51 +977,155 @@ def portfolio_management_agent(state: AgentState):
                     decision.cancel_existing_orders = True
                     decision.reasoning += f"\n\nExisting open orders for {ticker} will be canceled based on the 'hold' recommendation."
                     logger.info(f"Marking open orders for {ticker} to be canceled due to 'hold' recommendation")
-        
-        # Execute the decisions if we're in live trading mode
-        if LIVE_TRADING_ENABLED:
-            client = get_alpaca_client()
-            if client:
-                for ticker, decision in decisions_to_execute.items():
-                    # First check if we need to cancel existing orders
-                    if decision.cancel_existing_orders:
-                        cancel_open_orders_for_ticker(client, ticker)
                     
-                    # Then execute the new trade if it's not a hold
+            # Check if we need to cancel existing orders for other decisions that change direction
+            if decision.action in ["buy", "short"] and "open_orders" in portfolio:
+                open_orders = portfolio["open_orders"]
+                if ticker in open_orders and open_orders[ticker]:
+                    # Check if existing orders conflict with the new direction
+                    conflicting_orders = False
+                    for order in open_orders[ticker]:
+                        if (decision.action == "buy" and order.side == "sell") or \
+                           (decision.action == "short" and order.side == "buy"):
+                            conflicting_orders = True
+                            break
+                    
+                    if conflicting_orders:
+                        decision.cancel_existing_orders = True
+                        decision.reasoning += f"\n\nExisting orders for {ticker} will be canceled due to change in direction."
+                        logger.info(f"Marking open orders for {ticker} to be canceled due to change in direction")
+        
+        # Execute the decisions regardless of live trading mode
+        # This ensures orders are processed in both paper trading and live modes
+        client = get_alpaca_client()
+        if client:
+            # Log whether we're in live or paper mode
+            env_type = "live trading" if LIVE_TRADING_ENABLED else "paper trading"
+            logger.info(f"Executing trading decisions with Alpaca ({env_type})")
+            
+            # Add enhanced debugging for account status
+            try:
+                account = client.get_account()
+                is_paper_account = getattr(account, 'is_paper', True)
+                env_type = "paper trading" if is_paper_account else "live trading"
+                logger.info(f"===== ORDER PROCESSING STARTED IN {env_type.upper()} MODE =====")
+                logger.info(f"LIVE_TRADING_ENABLED = {LIVE_TRADING_ENABLED}")
+                
+                # Print all decisions for debugging
+                for ticker, decision in decisions_to_execute.items():
+                    logger.info(f"Decision for {ticker}: action={decision.action}, cancel_orders={decision.cancel_existing_orders}")
+            except Exception as e:
+                logger.error(f"Error checking account details: {e}")
+                logger.info(f"===== ORDER PROCESSING STARTED IN UNKNOWN MODE =====")
+                logger.info(f"LIVE_TRADING_ENABLED = {LIVE_TRADING_ENABLED}")
+            
+            # First, process all cancellations
+            cancel_results = {}
+            try:
+                for ticker, decision in decisions_to_execute.items():
+                    if decision.cancel_existing_orders:
+                        logger.info(f"Step 1: Canceling existing orders for {ticker}")
+                        # First get the existing orders to see what we're canceling
+                        ticker_orders = get_alpaca_open_orders(client, ticker)
+                        if ticker in ticker_orders and ticker_orders[ticker]:
+                            logger.info(f"Found {len(ticker_orders[ticker])} orders to cancel for {ticker}")
+                            for i, order in enumerate(ticker_orders[ticker]):
+                                logger.info(f"Order {i+1} to cancel: ID={order.id}, Status={order.status}, Side={order.side}, Qty={order.qty}")
+                        else:
+                            logger.warning(f"No open orders found for {ticker} even though cancellation was requested")
+                        
+                        # Now proceed with cancellation
+                        cancel_result = cancel_open_orders_for_ticker(client, ticker)
+                        cancel_results[ticker] = cancel_result
+                        logger.info(f"Cancellation result for {ticker}: {cancel_result}")
+            except Exception as e:
+                logger.error(f"Error during order cancellation phase: {e}")
+                logger.exception("Detailed cancellation error traceback:")
+                
+            # Wait a bit longer for cancellations to be fully processed
+            if cancel_results:
+                logger.info("Waiting for cancellations to be fully processed...")
+                time.sleep(3)  # Increased wait time from 2 to 3 seconds
+                
+                # Verify cancellations by checking again
+                try:
+                    for ticker in cancel_results:
+                        post_cancel_orders = get_alpaca_open_orders(client, ticker)
+                        if ticker in post_cancel_orders and post_cancel_orders[ticker]:
+                            logger.warning(f"STILL FOUND {len(post_cancel_orders[ticker])} ORDERS for {ticker} AFTER CANCELLATION!")
+                            for i, order in enumerate(post_cancel_orders[ticker]):
+                                logger.warning(f"Remaining order {i+1}: ID={order.id}, Status={order.status}, Side={order.side}, Qty={order.qty}")
+                        else:
+                            logger.info(f"✓ Successfully canceled all orders for {ticker}")
+                except Exception as e:
+                    logger.error(f"Error during post-cancellation verification: {e}")
+                
+            # Then, execute all new trades
+            execution_results = {}
+            try:
+                for ticker, decision in decisions_to_execute.items():
+                    # Only execute if it's not a hold action and quantity > 0
                     if decision.action != "hold" and decision.quantity > 0:
-                        current_price = current_prices.get(ticker, 100.0)  # Default price if not available
-                        execute_alpaca_trade(ticker, decision.action, decision.quantity, current_price)
+                        # Double-check that the order won't conflict with existing orders
+                        proceed_with_execution = True
+                        
+                        # Re-check for open orders after cancellations
+                        open_orders = get_alpaca_open_orders(client, ticker)
+                        if ticker in open_orders and open_orders[ticker]:
+                            logger.warning(f"Still found {len(open_orders[ticker])} open orders for {ticker} after cancellation")
+                            
+                            # If we tried to cancel but failed, we'll log it and proceed anyway
+                            if ticker in cancel_results and cancel_results[ticker].get("success", False):
+                                logger.warning(f"Cancellation was reported successful but orders still exist! Attempting execution anyway.")
+                            else:
+                                proceed_with_execution = False
+                                logger.error(f"Cannot execute {decision.action} for {ticker} due to existing orders that couldn't be canceled")
+                        
+                        if proceed_with_execution:
+                            logger.info(f"Step 2: Executing {decision.action} for {ticker} with quantity {decision.quantity}")
+                            current_price = current_prices.get(ticker, 100.0)  # Default price if not available
+                            execution_result = execute_alpaca_trade(ticker, decision.action, decision.quantity, current_price)
+                            execution_results[ticker] = execution_result
+                            logger.info(f"Execution result for {ticker} {decision.action} {decision.quantity}: {execution_result}")
+            except Exception as e:
+                logger.error(f"Error during order execution phase: {e}")
+                logger.exception("Detailed execution error traceback:")
+        else:
+            logger.warning("Alpaca client not available - cannot execute trades or cancel orders")
         
         progress.update_status("portfolio_management_agent", None, "Done")
         
         # Create a human message with the decisions
         message = HumanMessage(
-            content=json.dumps(trading_decisions, default=serialize_for_json),
+            content=json.dumps({"decisions": serialize_for_json(trading_decisions.decisions)}),
             name="portfolio_management_agent",
         )
         
-        # Return the updated state with the trading decisions
+        # Print the reasoning if the flag is set
+        if metadata.get("show_reasoning", False):
+            show_agent_reasoning(trading_decisions, "Portfolio Management Agent")
+        
+        # Add the decisions to the data
         data["portfolio_decisions"] = trading_decisions
         
         return {
             "messages": [message],
             "data": data,
         }
-    except Exception as e:
-        progress.update_status("portfolio_management_agent", None, "Error")
-        logger.error(f"Error in portfolio management agent: {e}")
-        logger.error(traceback.format_exc())
         
-        # Create default decisions for all tickers
+    except Exception as e:
+        logger.error(f"Error in portfolio_management_agent: {e}")
+        
+        # Create a default output in case of error
         default_output = create_default_portfolio_output(tickers)
         
-        # Create a message with the default decisions
+        # Create a message with the default output
         message = HumanMessage(
-            content=json.dumps(default_output, default=serialize_for_json),
+            content=json.dumps({"decisions": serialize_for_json(default_output.decisions)}),
             name="portfolio_management_agent",
         )
         
-        # Return the updated state with the default decisions
+        # Add the default decisions to the data
         data["portfolio_decisions"] = default_output
         
         return {
@@ -1785,36 +2028,231 @@ def cancel_open_orders_for_ticker(client, ticker):
         ticker: Ticker symbol to cancel orders for
         
     Returns:
-        bool: True if orders were found and canceled, False otherwise
+        dict: Results of the cancellation operation including count and details
     """
+    logger.info(f"=== CANCEL ORDERS START: {ticker} ===")
+    
     if not client:
         logger.warning("No Alpaca client provided for canceling orders")
-        return False
+        return {"success": False, "reason": "No Alpaca client provided", "count": 0, "ticker": ticker}
         
     logger.info(f"Attempting to cancel all open orders for {ticker}")
     
     try:
+        # First, check if we're in paper trading mode
+        try:
+            account = client.get_account()
+            is_paper = getattr(account, 'is_paper', True)
+            logger.info(f"Canceling orders in {'paper' if is_paper else 'live'} trading mode")
+        except Exception as e:
+            logger.warning(f"Could not determine trading mode: {e}")
+            is_paper = True  # Default to paper if we can't detect
+            
         # Get open orders for this ticker
         open_orders = get_alpaca_open_orders(client, ticker)
         
         if ticker not in open_orders or not open_orders[ticker]:
             logger.info(f"No open orders found for {ticker}")
-            return False
+            return {"success": False, "reason": "No open orders found", "count": 0, "ticker": ticker}
+            
+        # Log the orders we found
+        logger.info(f"Found {len(open_orders[ticker])} orders to cancel for {ticker}")
+        for i, order in enumerate(open_orders[ticker]):
+            logger.info(f"  Order {i+1}: ID={order.id}, Status={order.status}, Side={order.side}, Qty={order.qty}")
             
         # Cancel each order
         cancel_count = 0
+        canceled_order_ids = []
+        failed_order_ids = []
+        
         for order in open_orders[ticker]:
             try:
                 order_id = order.id
-                client.cancel_order_by_id(order_id)
-                logger.info(f"Canceled order {order_id} for {ticker}")
-                cancel_count += 1
-            except Exception as e:
-                logger.error(f"Error canceling order {order.id} for {ticker}: {e}")
+                logger.info(f"Attempting to cancel order {order_id} for {ticker}")
                 
-        logger.info(f"Canceled {cancel_count} orders for {ticker}")
-        return cancel_count > 0
+                # Try a direct cancel with enhanced error handling
+                try:
+                    # Cancel the order
+                    logger.info(f"Sending cancel request for order {order_id}")
+                    client.cancel_order_by_id(order_id)
+                    logger.info(f"Cancel request sent successfully for order {order_id}")
+                except Exception as e:
+                    error_message = str(e).lower()
+                    # Check if the error indicates the order is already canceled or doesn't exist
+                    if "order not found" in error_message or "already canceled" in error_message:
+                        logger.info(f"Order {order_id} already canceled or not found: {e}")
+                        cancel_count += 1
+                        canceled_order_ids.append(order_id)
+                        continue
+                    else:
+                        logger.error(f"Error canceling order {order_id}: {e}")
+                        failed_order_ids.append(order_id)
+                        continue
+                
+                # Verify the order is actually canceled
+                max_retries = 3
+                for retry in range(max_retries):
+                    try:
+                        # Get the order to check if it's canceled
+                        updated_order = client.get_order_by_id(order_id)
+                        order_status = getattr(updated_order, 'status', '').lower()
+                        
+                        if order_status == "canceled":
+                            logger.info(f"Confirmed order {order_id} for {ticker} is canceled (status: {order_status})")
+                            cancel_count += 1
+                            canceled_order_ids.append(order_id)
+                            break
+                        else:
+                            logger.warning(f"Order {order_id} for {ticker} not yet canceled (status: {order_status}), retry {retry+1}/{max_retries}")
+                            if retry < max_retries - 1:
+                                logger.info(f"Waiting 1 second before retry {retry+2}...")
+                                time.sleep(1)  # Wait a second before retrying
+                    except Exception as e:
+                        error_message = str(e).lower()
+                        # If we get an error like "order not found", it might be because it's canceled
+                        if "order not found" in error_message:
+                            logger.info(f"Order {order_id} for {ticker} not found - assuming it's canceled")
+                            cancel_count += 1
+                            canceled_order_ids.append(order_id)
+                            break
+                        else:
+                            logger.warning(f"Error checking order {order_id} status: {e}")
+                            if retry < max_retries - 1:
+                                logger.info(f"Waiting 1 second before retry {retry+2}...")
+                                time.sleep(1)  # Wait a second before retrying
+                else:
+                    # If we get here, all retries failed
+                    logger.error(f"Failed to confirm cancellation of order {order_id} for {ticker} after {max_retries} retries")
+                    failed_order_ids.append(order_id)
+            except Exception as e:
+                logger.error(f"Error in cancel process for order {order.id} for {ticker}: {e}")
+                logger.exception("Detailed error traceback:")
+                failed_order_ids.append(order.id)
+                
+        # Do a final check to see if there are any remaining orders
+        try:
+            remaining_orders = get_alpaca_open_orders(client, ticker)
+            if ticker in remaining_orders and remaining_orders[ticker]:
+                remaining_count = len(remaining_orders[ticker])
+                logger.warning(f"After cancellation process, still found {remaining_count} orders for {ticker}")
+                
+                # Log the remaining orders
+                for i, order in enumerate(remaining_orders[ticker]):
+                    order_id = getattr(order, 'id', 'unknown')
+                    logger.warning(f"  Remaining order {i+1}: ID={order_id}")
+                    
+                    # If this was supposed to be canceled but still exists, add it to failed list
+                    if order_id in canceled_order_ids:
+                        logger.error(f"Order {order_id} was reported as canceled but still exists!")
+                        # Move from canceled to failed
+                        canceled_order_ids.remove(order_id)
+                        if order_id not in failed_order_ids:
+                            failed_order_ids.append(order_id)
+                        cancel_count -= 1
+        except Exception as e:
+            logger.error(f"Error in final verification of cancellations: {e}")
+                
+        logger.info(f"Canceled {cancel_count} orders for {ticker}, {len(failed_order_ids)} failed to cancel")
+        
+        result = {
+            "success": cancel_count > 0,
+            "count": cancel_count,
+            "ticker": ticker,
+            "total_orders": len(open_orders[ticker]),
+            "canceled_order_ids": canceled_order_ids,
+            "failed_order_ids": failed_order_ids
+        }
+        
+        logger.info(f"=== CANCEL ORDERS RESULT: {ticker} - {cancel_count}/{len(open_orders[ticker])} canceled ===")
+        return result
         
     except Exception as e:
-        logger.error(f"Error canceling orders for {ticker}: {e}")
-        return False
+        error_message = str(e)
+        logger.error(f"Error canceling orders for {ticker}: {error_message}")
+        logger.exception("Detailed error traceback:")
+        
+        logger.info(f"=== CANCEL ORDERS FAILED: {ticker} ===")
+        return {"success": False, "reason": error_message, "count": 0, "ticker": ticker}
+
+
+def calculate_max_shares_per_ticker(portfolio, tickers):
+    """
+    Calculate the maximum number of shares to trade for each ticker.
+    
+    Args:
+        portfolio: Portfolio dictionary containing cash, positions, etc.
+        tickers: List of tickers to calculate max shares for
+        
+    Returns:
+        Dict mapping ticker to maximum shares that can be traded
+    """
+    max_shares = {}
+    
+    # Get portfolio cash and total value
+    portfolio_cash = portfolio.get("cash", 100000.0)
+    portfolio_value = portfolio.get("portfolio_value", portfolio_cash)
+    
+    # Default risk limit - don't put more than 5% of portfolio in any one position
+    risk_limit_pct = 0.05
+    
+    # Check if we have a risk dashboard with more specific limits
+    risk_dashboard = portfolio.get("risk_dashboard", {})
+    if risk_dashboard and "position_limits" in risk_dashboard:
+        position_limits = risk_dashboard["position_limits"]
+        if isinstance(position_limits, dict):
+            # See if we have ticker-specific limits
+            for ticker in tickers:
+                if ticker in position_limits:
+                    ticker_limit = position_limits[ticker]
+                    max_position_value = portfolio_value * ticker_limit
+                    
+                    # Get current price (default to $100 if not available)
+                    current_price = 100.0
+                    if "current_prices" in portfolio and ticker in portfolio["current_prices"]:
+                        current_price = portfolio["current_prices"][ticker]
+                    elif "positions" in portfolio and ticker in portfolio["positions"]:
+                        position = portfolio["positions"][ticker]
+                        if "current_price" in position:
+                            current_price = position["current_price"]
+                    
+                    # Calculate max shares based on position limit
+                    max_shares_by_limit = int(max_position_value / current_price)
+                    
+                    # Limit by available cash as well
+                    max_shares_by_cash = int(portfolio_cash / current_price * 0.95)  # Use 95% of cash at most
+                    
+                    # Use the smaller of the two limits
+                    max_shares[ticker] = min(max_shares_by_limit, max_shares_by_cash)
+                    
+                    # Ensure we have at least a minimum number of shares
+                    max_shares[ticker] = max(max_shares[ticker], 5)
+    
+    # For any tickers that didn't have specific limits
+    for ticker in tickers:
+        if ticker not in max_shares:
+            # Get current price (default to $100 if not available)
+            current_price = 100.0
+            if "current_prices" in portfolio and ticker in portfolio["current_prices"]:
+                current_price = portfolio["current_prices"][ticker]
+            elif "positions" in portfolio and ticker in portfolio["positions"]:
+                position = portfolio["positions"][ticker]
+                if "current_price" in position:
+                    current_price = position["current_price"]
+            
+            # Calculate max shares based on default risk limit
+            max_position_value = portfolio_value * risk_limit_pct
+            max_shares_by_limit = int(max_position_value / current_price)
+            
+            # Limit by available cash as well
+            max_shares_by_cash = int(portfolio_cash / current_price * 0.95)  # Use 95% of cash at most
+            
+            # Use the smaller of the two limits
+            max_shares[ticker] = min(max_shares_by_limit, max_shares_by_cash)
+            
+            # Ensure we have at least a minimum number of shares
+            max_shares[ticker] = max(max_shares[ticker], 5)
+    
+    # Log the calculated values
+    logging.info(f"Calculated max shares: {max_shares}")
+    
+    return max_shares

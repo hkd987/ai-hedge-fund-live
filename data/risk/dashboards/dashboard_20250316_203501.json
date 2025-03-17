@@ -1,0 +1,23 @@
+{
+  "timestamp": "2025-03-16T20:35:01.145314",
+  "market_regime": {
+    "regime": "Unknown",
+    "confidence": 0.0,
+    "risk_adjustment": 1.0,
+    "reason": "Insufficient market data for regime detection"
+  },
+  "sector_exposures": {
+    "Cash": 100.0
+  },
+  "over_exposed_sectors": [],
+  "correlation_risks": [],
+  "portfolio_beta": 0.0,
+  "beta_interpretation": null,
+  "liquidity_risk": "None",
+  "high_liquidity_risk_positions": [],
+  "diversity_score": 0,
+  "robustness_score": 0,
+  "time_risk_adjustment": 1.0,
+  "position_risks": {},
+  "position_sizing": {}
+}
